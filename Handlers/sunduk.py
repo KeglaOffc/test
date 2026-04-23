@@ -16,7 +16,6 @@ router = Router()
 # Защита от spam
 CHEST_COOLDOWN = {}
 
-# --- РЕЖИМЫ СУНДУКОВ ---
 MODES = {
     "normal": {"name": "Обычный", "emoji": "📦", "chests": 3, "multiplier": 1.0},
     "extreme": {"name": "Экстрим", "emoji": "🔥", "chests": 5, "multiplier": 2.0},
@@ -126,7 +125,6 @@ async def chest_open(call: types.CallbackQuery):
             else:
                 base_pool = [2.0, 0.0, 0.5]
             
-            # --- ЛОГИКА ПОДКРУТКИ ---
             u_d = db_get_user(user_id)
             status = u_d[6]
             

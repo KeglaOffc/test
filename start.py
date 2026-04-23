@@ -66,7 +66,9 @@ from Handlers import (  # noqa: E402
     monetka,
     pvp,
     qtop,
+    roulette,
     sunduk,
+    wheel,
 )
 from Handlers.logging_middleware import LoggingMiddleware  # noqa: E402
 from Handlers.maintenance import MaintenanceMiddleware  # noqa: E402
@@ -101,6 +103,8 @@ ROUTERS = [
     mining.router,
     pvp.router,
     crash.router,
+    roulette.router,
+    wheel.router,
 ]
 
 

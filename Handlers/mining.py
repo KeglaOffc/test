@@ -15,16 +15,13 @@ router = Router()
 
 SLOT_UPGRADE_PRICE = 10000
 
-# --- КОНФИГУРАЦИЯ ОБОРУДОВАНИЯ ---
 SHOP_ITEMS = {
-    # --- CPU (Процессоры) ---
     "cpu_old": {"name": "🖥️ Старый ПК", "price": 1000, "hs": 2, "watt": 1, "type": "cpu"},
     "cpu_office": {"name": "🖥️ Офисный Core i3", "price": 2500, "hs": 5, "watt": 3, "type": "cpu"},
     "cpu_server": {"name": "🖥️ Intel Xeon Gold", "price": 7000, "hs": 18, "watt": 8, "type": "cpu"},
     "cpu_threadripper": {"name": "🖥️ AMD Threadripper", "price": 15000, "hs": 45, "watt": 15, "type": "cpu"},
     "cpu_quantum_mini": {"name": "🧪 Квантовый чип v1", "price": 50000, "hs": 150, "watt": 30, "type": "cpu"},
 
-    # --- GPU (Видеокарты) ---
     "gpu_1050": {"name": "💻 GTX 1050 Ti", "price": 15000, "hs": 40, "watt": 10, "type": "gpu"},
     "gpu_2060": {"name": "💻 RTX 2060 Super", "price": 35000, "hs": 110, "watt": 25, "type": "gpu"},
     "gpu_3080": {"name": "💻 RTX 3080 Ti", "price": 90000, "hs": 320, "watt": 50, "type": "gpu"},
@@ -32,7 +29,6 @@ SHOP_ITEMS = {
     "gpu_tesla": {"name": "💻 NVIDIA H100 (AI)", "price": 750000, "hs": 2800, "watt": 300, "type": "gpu"},
     "gpu_mining_rig": {"name": "🚜 Риг из 8x GPU", "price": 1200000, "hs": 5500, "watt": 800, "type": "gpu"},
 
-    # --- ASIC (Спец. оборудование) ---
     "asic_s9": {"name": "📱 Antminer S9", "price": 150000, "hs": 650, "watt": 130, "type": "asic"},
     "asic_t17": {"name": "📱 Antminer T17+", "price": 300000, "hs": 1400, "watt": 250, "type": "asic"},
     "asic_s19": {"name": "📱 Antminer S19 Pro", "price": 600000, "hs": 3200, "watt": 450, "type": "asic"},
@@ -40,13 +36,11 @@ SHOP_ITEMS = {
     "asic_ks3": {"name": "📱 IceRiver KS3", "price": 4000000, "hs": 25000, "watt": 2000, "type": "asic"},
     "asic_dragon": {"name": "🐲 Dragon King v2", "price": 10000000, "hs": 75000, "watt": 5000, "type": "asic"},
 
-    # --- NODE (Узлы сети) ---
     "node_light": {"name": "🔗 Light Node", "price": 500000, "hs": 2000, "watt": 100, "type": "node"},
     "node_eth": {"name": "🔗 Ethereum Node", "price": 2000000, "hs": 10000, "watt": 300, "type": "node"},
     "node_full": {"name": "🔗 Full Archive Node", "price": 8000000, "hs": 45000, "watt": 1200, "type": "node"},
     "node_cluster": {"name": "🔗 Node Cluster 24/7", "price": 25000000, "hs": 150000, "watt": 3500, "type": "node"},
 
-    # --- CLOUD (Облачный майнинг) ---
     "cloud_trial": {"name": "☁️ Cloud Start", "price": 100000, "hs": 350, "watt": 0, "type": "cloud"},
     "cloud_basic": {"name": "☁️ Cloud Basic", "price": 500000, "hs": 1800, "watt": 0, "type": "cloud"},
     "cloud_premium": {"name": "☁️ Cloud Premium", "price": 2500000, "hs": 10000, "watt": 0, "type": "cloud"},
@@ -63,7 +57,6 @@ AUTO_ITEMS = {
     "antihack": {"name": "🔐 Анти-хакер", "price": 200000, "desc": "Защита от кражи накопленных монет (события)"}
 }
 
-# --- КОНФИГУРАЦИЯ АПГРЕЙДОВ (ТЗ 3.1) ---
 UPGRADES_DATA = {
     # 🔧 МОДУЛИ ОХЛАЖДЕНИЯ
     "cooler_1": {"name": "🔧 Базовый кулер", "lvl": 1, "price": 5000, "wear_red": 0.10, "pwr_boost": 0},
@@ -102,7 +95,6 @@ UPGRADES_DATA = {
 
 
 
-# --- КОНФИГУРАЦИЯ СОБЫТИЙ (6.1 и 6.2) ---
 NEG_EVENTS = {
     "voltage": {"name": "⚡ Скачок напряжения", "desc": "Одно устройство полностью вышло из строя!"},
     "overheat": {"name": "🌡️ Перегрев", "desc": "Мощность упала на 50% на 3 часа!"},
@@ -122,7 +114,6 @@ POS_EVENTS = {
     "subsidy": {"name": "⚡ Энерго-субсидия", "desc": "Бесплатное электричество на 6 часов!"}
 }
 
-# --- ФУНКЦИИ ЛОГИКИ ---
 def get_farm(user_id):
     cursor.execute("SELECT * FROM mining_farms WHERE user_id = ?", (user_id,))
     res = cursor.fetchone()
@@ -150,7 +141,6 @@ def recalculate_farm(user_id):
                    (total_hs, total_watt, user_id))
     conn.commit()
 
-# --- ОБРАБОТЧИКИ ---
 
 @router.message(Command("mining"))
 @router.callback_query(F.data == "min:back") # Добавляем отлов кнопки "Назад" прямо сюда
@@ -199,13 +189,10 @@ async def mining_menu(event: types.Message | types.CallbackQuery):
         # Если это команда /mining, шлем новое сообщение
         await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
-# --- СИСТЕМА УПРАВЛЕНИЯ ЖЕЛЕЗОМ (АПГРЕЙДЫ) ---
 
 @router.callback_query(F.data == "min:manage")
 async def manage_hardware(call: types.CallbackQuery):
     user_id = call.from_user.id
-    if not call.message or call.message.chat.id != user_id:
-        return await call.answer("❌ Это сообщение не вам!", show_alert=True)
     cursor.execute("SELECT id, name, lvl FROM mining_items WHERE user_id = ?", (user_id,))
     items = cursor.fetchall()
     
@@ -229,10 +216,6 @@ async def manage_hardware(call: types.CallbackQuery):
 async def item_details(call: types.CallbackQuery):
     item_id = int(call.data.split(":")[1])
     user_id = call.from_user.id
-    if not call.message or call.message.chat.id != user_id:
-        return await call.answer("❌ Это сообщение не вам!", show_alert=True)
-
-    # ПРОВЕРКА ВЛАДЕЛЬЦА
     cursor.execute("SELECT * FROM mining_items WHERE id = ?", (item_id,))
     item = cursor.fetchone()
     
@@ -353,7 +336,6 @@ async def buy_upgrade_final(call: types.CallbackQuery):
     upg_key = data[2]
     user_id = call.from_user.id
     
-    # 1. ПРОВЕРКА ВЛАДЕЛЬЦА (Безопасность)
     cursor.execute("SELECT user_id, upgrades FROM mining_items WHERE id = ?", (item_id,))
     res = cursor.fetchone()
     if not res or res[0] != user_id:
@@ -361,27 +343,22 @@ async def buy_upgrade_final(call: types.CallbackQuery):
     
     current_upgrades = res[1] if res[1] else ""
 
-    # 2. ПОЛУЧАЕМ ДАННЫЕ АПГРЕЙДА (Сначала объявляем, потом используем)
     upg = UPGRADES_DATA.get(upg_key)
     if not upg:
         return await call.answer("❌ Апгрейд не найден!")
 
-    # 3. ПРОВЕРКА БАЛАНСА
     u = db_get_user(user_id) # Получаем баланс из БД
     if u[0] < upg['price']:
         return await call.answer(f"❌ Нужно {upg['price']:,} 💸", show_alert=True)
     
-    # 4. ПРОВЕРКА: Не куплен ли уже этот модуль?
     if upg_key in current_upgrades.split(','):
         return await call.answer("✅ Этот модуль уже установлен!", show_alert=True)
 
-    # 5. РАСЧЕТ ЭФФЕКТОВ
     new_upgrades = f"{current_upgrades},{upg_key}" if current_upgrades else upg_key
     pwr_mul = 1 + upg.get("pwr_boost", 0)
     # Считаем изменение потребления (снижение или увеличение)
     watt_mul = 1 - upg.get("watt_red", 0) + upg.get("watt_plus", 0)
     
-    # 6. ОБНОВЛЕНИЕ БАЗЫ ДАННЫХ
     try:
         # Списываем деньги
         cursor.execute("UPDATE users SET balance = balance - ? WHERE id = ?", (upg['price'], user_id))
@@ -398,7 +375,6 @@ async def buy_upgrade_final(call: types.CallbackQuery):
         
         await call.answer(f"✅ Установлено: {upg['name']}")
         
-        # 7. ОБНОВЛЯЕМ МЕНЮ (чтобы сразу появилась галочка ✅)
         await show_all_upgrades(call) 
         
     except Exception as e:
@@ -436,7 +412,6 @@ async def process_lvlup(call: types.CallbackQuery):
     
 
     
-# --- ФУНКЦИЯ ГЕНЕРАЦИИ СОБЫТИЯ ---
 async def apply_random_event(user_id, current_pending):
     # Шанс 20% для теста (потом можешь поставить 10-15%)
     if random.randint(1, 100) > 30:
@@ -454,7 +429,6 @@ async def apply_random_event(user_id, current_pending):
     
     new_pending = current_pending
 
-    # --- ЛОГИКА КАЖДОГО СОБЫТИЯ ---
     if event_key == "voltage":
         # Ломаем одну случайную вещь
         cursor.execute("UPDATE mining_items SET wear = 0 WHERE user_id = ? ORDER BY RANDOM() LIMIT 1", (user_id,))
@@ -482,13 +456,10 @@ async def apply_random_event(user_id, current_pending):
     return f"🎲 <b>СОБЫТИЕ: {event['name']}</b>\n<i>{event['desc']}</i>", new_pending
 
 
-# --- МАГАЗИН (КАТЕГОРИИ) ---
 
 @router.callback_query(F.data == "min:shop")
 async def mining_shop_categories(call: types.CallbackQuery):
     user_id = call.from_user.id
-    if not call.message or call.message.chat.id != user_id:
-        return await call.answer("❌ Это сообщение не вам!", show_alert=True)
     farm = get_farm(user_id)
     kb = InlineKeyboardBuilder()
     kb.button(text="🖥️ CPU", callback_data="min_cat:cpu")
@@ -513,8 +484,6 @@ async def mining_shop_categories(call: types.CallbackQuery):
 @router.callback_query(F.data.startswith("min_cat:"))
 async def show_category_items(call: types.CallbackQuery):
     user_id = call.from_user.id
-    if not call.message or call.message.chat.id != user_id:
-        return await call.answer("❌ Это сообщение не вам!", show_alert=True)
     category = call.data.split(":")[1]
     kb = InlineKeyboardBuilder()
     
@@ -551,8 +520,6 @@ async def show_category_items(call: types.CallbackQuery):
 @router.callback_query(F.data == "min:upgrade_slots")
 async def process_upgrade_slots(call: types.CallbackQuery):
     user_id = call.from_user.id
-    if not call.message or call.message.chat.id != user_id:
-        return await call.answer("❌ Это сообщение не вам!", show_alert=True)
     u = db_get_user(user_id)
     farm = get_farm(user_id)
     max_slots = 100 if u[6] == 'vip' else 50
@@ -593,8 +560,6 @@ async def process_mining_buy(call: types.CallbackQuery):
 @router.callback_query(F.data == "min:collect")
 async def process_collect(call: types.CallbackQuery):
     user_id = call.from_user.id
-    if not call.message or call.message.chat.id != user_id:
-        return await call.answer("❌ Это сообщение не вам!", show_alert=True)
     pending = get_pending(user_id)
     
     if pending < 0.1:
@@ -637,9 +602,7 @@ async def process_collect(call: types.CallbackQuery):
 
 
 
-# ============================================================================
 # КРУТЫЕ ФУНКЦИИ #1-5: МИНИ-ИГРЫ, АНАЛИТИКА, ДОСТИЖЕНИЯ, ПУЛИНГ, РЫНОК
-# ============================================================================
 
 MINI_GAMES = {
     "ore_dig": {"name": "⛏️ Копание руды", "chance": 0.6, "reward": 5000},

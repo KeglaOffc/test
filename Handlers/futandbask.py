@@ -17,7 +17,6 @@ router = Router()
 # Защита от spam
 FOOTBALL_COOLDOWN = {}
 
-# === СОСТОЯНИЯ ДЛЯ ФУТБОЛА И БАСКЕТА ===
 class FootballState(StatesGroup):
     choosing_difficulty = State()
     playing_series = State()
@@ -26,7 +25,6 @@ class BasketState(StatesGroup):
     choosing_difficulty = State()
     playing_series = State()
 
-# === КОНСТАНТЫ СЛОЖНОСТИ ===
 DIFFICULTY_SETTINGS = {
     "1": {"name": "🟢 Легко", "wins": [3, 4, 5], "coeff": 1.5, "color": "🟢"},
     "2": {"name": "🔵 Нормально", "wins": [4, 5], "coeff": 1.8, "color": "🔵"},
@@ -43,7 +41,6 @@ DIFFICULTY_SETTINGS_BASKET = {
     "5": {"name": "⚫ ЭКСТРИМ", "wins": [5], "coeff": 5.0, "color": "⚫"},
 }
 
-# === ФУТБОЛ ===
 @router.message(Command("football"))
 async def football_start(message: types.Message, state: FSMContext):
     user_data = await check_user(message)
@@ -229,7 +226,6 @@ async def replay_football(call: types.CallbackQuery, state: FSMContext):
     await asyncio.sleep(2)
     await football_penalty_series(call, state)
 
-# === БАСКЕТ ===
 @router.message(Command("basket"))
 async def basket_start(message: types.Message, state: FSMContext):
     user_data = await check_user(message)
@@ -378,115 +374,148 @@ async def replay_basket(call: types.CallbackQuery, state: FSMContext):
     
     await basket_penalty_series(call, state)
 
-# === SLOT (Новая система с комбинациями и двойным режимом) ===
 
-# Выигрышные комбинации слотов
-SLOT_COMBINATIONS = {
-    "🍒🍒🍒": {"name": "ТРОЙНАЯ ВИШНЯ", "coeff": 10, "icon": "🍒💎🍒"},
-    "🍋🍋🍋": {"name": "ТРОЙНОЙ ЛИМОН", "coeff": 8, "icon": "🍋✨🍋"},
-    "🍊🍊🍊": {"name": "ТРОЙНОЙ АПЕЛЬСИН", "coeff": 6, "icon": "🍊🎯🍊"},
-    "🔔🔔🔔": {"name": "ТРОЙНОЙ КОЛОКОЛ", "coeff": 5, "icon": "🔔💫🔔"},
-    "7️⃣7️⃣7️⃣": {"name": "ТРОЙНАЯ СЕМЁРКА", "coeff": 15, "icon": "🎰🌟🎰"},
-    "💰💰💰": {"name": "ТРОЙНОЙ ДЖЕКПОТ", "coeff": 20, "icon": "💰🔥💰"},
-    # Двойные комбинации (малые выигрыши)
-    "🍒🍒": {"name": "ДВЕ ВИШНИ", "coeff": 2, "icon": "🍒🍒"},
-    "7️⃣7️⃣": {"name": "ДВЕ СЕМЁРКИ", "coeff": 3, "icon": "7️⃣7️⃣"},
+SLOT_SYMBOLS = {
+    1: "🍫", 2: "🍫", 3: "🍫", 4: "🍒",
+    5: "🍫", 6: "🍫", 7: "🍒", 8: "🍋",
+    9: "🍫", 10: "🍫", 11: "🍋", 12: "🍫",
+    13: "🍫", 14: "🍋", 15: "🍒", 16: "🍫",
+    17: "🍋", 18: "🍫", 19: "🍒", 20: "🍫",
+    21: "🍫", 22: "🍒", 23: "🍫", 24: "🍫",
+    25: "🍫", 26: "🍒", 27: "🍋", 28: "🍫",
+    29: "🍫", 30: "🍋", 31: "🍒", 32: "🍫",
+    33: "🍒", 34: "🍫", 35: "🍫", 36: "🍫",
+    37: "🍫", 38: "🍋", 39: "🍋", 40: "🍫",
+    41: "🍫", 42: "🍒", 43: "🍋", 44: "🍫",
+    45: "🍫", 46: "🍋", 47: "🍫", 48: "🍒",
+    49: "🍫", 50: "🍫", 51: "🍫", 52: "🍒",
+    53: "🍫", 54: "🍫", 55: "🍒", 56: "🍋",
+    57: "🍫", 58: "🍫", 59: "🍋", 60: "🍫",
+    61: "🍫", 62: "🍫", 63: "🍋", 64: "7️⃣",
 }
+
+SLOT_TRIPLES = {
+    1:  {"reels": "🍫🍫🍫", "name": "Три шоколадки",   "coeff": 6},
+    22: {"reels": "🍒🍒🍒", "name": "Три вишни",       "coeff": 10},
+    43: {"reels": "🍋🍋🍋", "name": "Три лимона",      "coeff": 15},
+    64: {"reels": "7️⃣7️⃣7️⃣", "name": "Джекпот 777",  "coeff": 30},
+}
+
+
+def slot_result(value: int) -> dict:
+    """Раскладывает значение Telegram-дайса 🎰 (1..64) в результат слота."""
+    if value in SLOT_TRIPLES:
+        data = SLOT_TRIPLES[value]
+        return {"reels": data["reels"], "name": data["name"], "coeff": data["coeff"]}
+
+    v = value - 1
+    reels = [SLOT_SYMBOLS[(v % 4) + 1],
+             SLOT_SYMBOLS[((v // 4) % 4) + 1],
+             SLOT_SYMBOLS[((v // 16) % 4) + 1]]
+    counts = {s: reels.count(s) for s in reels}
+
+    if counts.get("🍒", 0) == 2:
+        return {"reels": "".join(reels), "name": "Две вишни", "coeff": 2}
+    if counts.get("🍫", 0) == 2:
+        return {"reels": "".join(reels), "name": "Две шоколадки", "coeff": 1}
+    return {"reels": "".join(reels), "name": "Мимо", "coeff": 0}
+
 
 @router.message(Command("slot", "slots"))
 async def play_slots(message: types.Message):
     user_data = await check_user(message)
-    if not user_data: return
-    
+    if not user_data:
+        return
+
     args = message.text.split()
-    if len(args) < 2:
-        return await message.reply("📝 Формат: /slot [ставка] [режим]\n/slot 1000 - одиночная крутка\n/slot 1000 double - двойная крутка (x3 при 2 выигрышах)")
-    
-    if not args[1].isdigit():
-        return await message.reply("❌ Ставка должна быть числом!")
-    
+    if len(args) < 2 or not args[1].isdigit():
+        return await message.reply(
+            "🎰 <b>Слоты</b>\n"
+            "Формат: <code>/slot [ставка]</code>\n\n"
+            "Выплаты за комбинации:\n"
+            "• 🍫🍫🍫 — x6\n"
+            "• 🍒🍒🍒 — x10\n"
+            "• 🍋🍋🍋 — x15\n"
+            "• 7️⃣7️⃣7️⃣ — x30 (джекпот)\n"
+            "• Две вишни — x2\n"
+            "• Две шоколадки — x1 (возврат ставки)",
+            parse_mode="HTML",
+        )
+
     bet = int(args[1])
 
     is_no_limit = user_data[9] == 777
-    if not is_no_limit and bet > 1000000:
-        return await message.reply("❌ Максимальная ставка — 1,000,000 💎")
+    if not is_no_limit and bet > 1_000_000:
+        return await message.reply("❌ Максимальная ставка — 1 000 000 💎")
 
     if bet > user_data[0] or bet < 10:
-        return await message.reply(
-            f"❌ Некорректная ставка. Баланс: {user_data[0]:,}"
-        )
+        return await message.reply(f"❌ Некорректная ставка. Баланс: {user_data[0]:,}")
 
-    await play_single_slot(message, bet, user_data)
+    await play_single_slot(message, bet)
 
-async def play_single_slot(message: types.Message, bet: int, user_data: tuple):
-    """Одиночная крутка слота"""
+
+async def play_single_slot(message: types.Message, bet: int):
+    user_id = message.from_user.id
     try:
-        # Честная игра - 30% на выигрыш + бонус от клевера (rig_prob)
-        # rig_prob по умолчанию 50. Каждые +5 дают +5% к шансу.
-        base_chance = 0.30
-        luck_bonus = max(0, (user_data[1] - 50) * 0.01)
-        final_chance = min(0.60, base_chance + luck_bonus) # Максимум 60% шанс
-        
-        if random.random() < final_chance:
-            combo = random.choice(list(SLOT_COMBINATIONS.keys()))
-        else:
-            combo = random.choice(["🍓🍌🍇", "🎭🎪🎨", "🌟🌙⭐", "🎯🎲🎰"])
-        
-        # Вычитаем ставку
-        cursor.execute("UPDATE users SET balance = balance - ? WHERE id = ?", (bet, message.from_user.id))
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute("SELECT balance FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row or row[0] < bet:
+            cursor.execute("ROLLBACK")
+            return await message.reply("❌ Недостаточно средств.")
+        cursor.execute("UPDATE users SET balance = balance - ? WHERE id = ?", (bet, user_id))
         conn.commit()
-        
-        # Отправляем анимацию
-        msg = await message.answer_dice(emoji="🎰")
-        await asyncio.sleep(3.5)
-        
-        # Проверяем выигрыш
-        if combo in SLOT_COMBINATIONS:
-            combo_data = SLOT_COMBINATIONS[combo]
-            win_payout = int(bet * combo_data["coeff"])
-            
-            # Добавляем выигрыш
-            db_update_stats(message.from_user.id, bet, win_payout, deducted=True)
-            
-            result_text = f"🎰 **{combo_data['icon']} ВЫИГРЫШ!** 🎰\n\n"
-            result_text += f"🏆 Комбинация: {combo_data['name']}\n"
-            result_text += f"💰 Множитель: x{combo_data['coeff']}\n"
-            result_text += f"💎 Выигрыш: +{win_payout:,} 💎\n"
-        else:
-            db_update_stats(message.from_user.id, bet, 0, deducted=True)
-            result_text = f"❌ **ПРОИГРЫШ** {combo}\n\n"
-            result_text += f"💎 Ставка: -{bet:,} 💎\n"
-        
-        new_balance = db_get_user(message.from_user.id)[0]
-        result_text += f"\n💳 Баланс: {new_balance:,} 💎"
-        
-        builder = InlineKeyboardBuilder()
-        builder.button(text="🔄 Переиграть", callback_data=f"replay_slot:{bet}")
-        builder.button(text="🏠 В меню", callback_data="back_to_profile")
-        builder.adjust(1)
-        
-        try:
-            await message.answer(result_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-        except TelegramRetryAfter as e:
-            await asyncio.sleep(e.retry_after)
-            await message.answer(result_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-        except Exception as e:
-            await message.answer(f"❌ Ошибка отправки: {str(e)}\n\nРезультат:\n{result_text}", parse_mode="Markdown")
-    except Exception as e:
-        import logging
-        logging.error(f"Ошибка в play_single_slot: {str(e)}")
-        await message.answer(f"❌ Ошибка в игре слотов: {str(e)}", parse_mode="Markdown")
+    except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("Слоты: не удалось списать ставку")
+        return await message.reply("❌ Ошибка. Попробуй ещё раз.")
+
+    dice_msg = await message.answer_dice(emoji="🎰")
+    await asyncio.sleep(2.5)
+
+    result = slot_result(dice_msg.dice.value)
+    payout = int(bet * result["coeff"])
+    db_update_stats(user_id, bet, payout, deducted=True)
+
+    new_balance = db_get_user(user_id)[0]
+
+    if result["coeff"] >= 2:
+        header = "🎉 <b>ВЫИГРЫШ</b>"
+    elif result["coeff"] == 1:
+        header = "↩️ <b>ВОЗВРАТ</b>"
+    else:
+        header = "❌ <b>Мимо</b>"
+
+    text = (
+        f"{header}\n\n"
+        f"🎰 {result['reels']}\n"
+        f"▶️ {result['name']}  •  x{result['coeff']}\n"
+        f"{'+' if payout - bet >= 0 else ''}{payout - bet:,} 💎\n\n"
+        f"💳 Баланс: {new_balance:,} 💎"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"🔄 Ещё за {bet:,}", callback_data=f"replay_slot:{bet}")
+    kb.button(text="✖️ x2 ставку", callback_data=f"replay_slot:{bet * 2}")
+    kb.button(text="🏠 В меню", callback_data="back_to_profile")
+    kb.adjust(1, 1, 1)
+
+    try:
+        await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except TelegramRetryAfter as e:
+        await asyncio.sleep(e.retry_after)
+        await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
 
 @router.callback_query(F.data.startswith("replay_slot:"))
 async def replay_slot(call: types.CallbackQuery):
+    await call.answer()
     bet = int(call.data.split(":")[1])
     user_data = await check_user(call.message)
     if not user_data or user_data[0] < bet:
-        return await call.answer("❌ Недостаточно средств!", show_alert=True)
-    
-    await play_single_slot(call.message, bet, user_data)
+        return await call.message.answer("❌ Недостаточно средств для повтора.")
+    await play_single_slot(call.message, bet)
 
-# === Обработчик кнопки "В меню" ===
 @router.callback_query(F.data == "back_to_profile")
 async def go_back_to_profile(call: types.CallbackQuery, state: FSMContext):
     """Возврат в профиль и удаление игрового сообщения"""

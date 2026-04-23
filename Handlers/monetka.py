@@ -99,7 +99,6 @@ async def flip_result(call: types.CallbackQuery):
             # Списываем ставку АТОМАРНО
             cursor.execute("UPDATE users SET balance = balance - ? WHERE id = ?", (bet, user_id))
             
-            # --- ЛОГИКА РЕЗУЛЬТАТА ---
             status_db = u_d[6]
             
             if status_db == "win":

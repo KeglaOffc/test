@@ -61,13 +61,15 @@ def build_admin_panel():
     builder.button(text="⛏️ Майнинг", callback_data="admin:mining")
     builder.button(text="🎮 Игроки", callback_data="admin:players")
     builder.button(text="📢 Рассылка", callback_data="admin:broadcast")
+    builder.button(text="🏆 Топ", callback_data="admin:top")
     builder.button(text="📊 Статистика", callback_data="admin:stats")
+    builder.button(text="🎁 Раздача всем", callback_data="admin:giveall")
 
     is_maint = get_maintenance_mode()
     maint_text = "🔴 Тех. работы: ВКЛ" if is_maint else "🟢 Тех. работы: ВЫКЛ"
     builder.button(text=maint_text, callback_data="admin:toggle_maintenance")
 
-    builder.adjust(2, 2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 2, 2, 1)
 
     text = (
         "👑 <b>АДМИН-ПАНЕЛЬ</b>\n"
@@ -144,7 +146,6 @@ async def admin_maintenance_cmd(message: types.Message):
         )
 
 
-# --- Подменю -----------------------------------------------------------------
 
 
 @router.callback_query(F.data == "admin:balance")
@@ -272,7 +273,6 @@ async def admin_mining_menu(call: types.CallbackQuery):
     await call.message.edit_text(text, reply_markup=back_to_panel_kb(), parse_mode="HTML")
 
 
-# --- Команды: баланс ---------------------------------------------------------
 
 
 @router.message(Command("setbal"))
@@ -364,7 +364,6 @@ async def admin_reset_money(message: types.Message):
     await message.answer(f"✅ Баланс игрока <code>{target}</code> обнулён.", parse_mode="HTML")
 
 
-# --- Команды: подкрутка (отключена) -----------------------------------------
 
 
 @router.message(Command("rig", "podk"))
@@ -377,7 +376,6 @@ async def admin_rig_disabled(message: types.Message):
     )
 
 
-# --- Команды: блокировки -----------------------------------------------------
 
 
 @router.message(Command("ban"))
@@ -422,7 +420,6 @@ async def admin_getbans(message: types.Message):
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
-# --- Команды: информация / игроки --------------------------------------------
 
 
 @router.message(Command("allplayers"))
@@ -482,7 +479,6 @@ async def admin_info(message: types.Message):
     await message.answer(text, parse_mode="HTML")
 
 
-# --- Команды: предметы -------------------------------------------------------
 
 
 @router.message(Command("additem"))
@@ -552,7 +548,6 @@ async def admin_show_mines(message: types.Message):
     await message.answer("\n".join(grid), parse_mode="HTML")
 
 
-# --- Команды: игроки ---------------------------------------------------------
 
 
 @router.message(Command("reset_user"))
@@ -600,7 +595,6 @@ async def admin_deluser(message: types.Message):
     await message.answer(f"✅ Игрок {real_id} удалён из системы.")
 
 
-# --- Команды: майнинг --------------------------------------------------------
 
 
 @router.message(Command("mine_add"))
@@ -721,7 +715,6 @@ async def admin_mine_boost(message: types.Message):
     await message.answer(f"✅ Выдано {amount} энергетиков игроку {user_id}")
 
 
-# --- Команды: рассылка -------------------------------------------------------
 
 
 @router.message(Command("bcgroup"))
@@ -779,4 +772,69 @@ async def admin_bc_help(message: types.Message):
         "<code>/bcgroup [ID группы] [текст]</code> — в конкретный чат\n\n"
         "Поддерживаются HTML-теги: <b>жирный</b>, <i>курсив</i>, <code>код</code>.",
         parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "admin:top")
+async def admin_top_menu(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer()
+    cursor.execute(
+        "SELECT custom_id, balance FROM users "
+        "WHERE banned = 0 ORDER BY balance DESC LIMIT 10"
+    )
+    top_bal = cursor.fetchall()
+    cursor.execute(
+        "SELECT custom_id, games_played FROM users "
+        "WHERE banned = 0 ORDER BY games_played DESC LIMIT 5"
+    )
+    top_games = cursor.fetchall()
+
+    lines = ["<b>🏆 ТОП-10 ПО БАЛАНСУ</b>"]
+    for i, (name, bal) in enumerate(top_bal, 1):
+        lines.append(f"{i}. <code>{name or '—'}</code> — {bal:,} 💎")
+    lines.append("")
+    lines.append("<b>🎮 ТОП-5 ПО ИГРАМ</b>")
+    for i, (name, games) in enumerate(top_games, 1):
+        lines.append(f"{i}. <code>{name or '—'}</code> — {games} игр")
+
+    await call.message.edit_text(
+        "\n".join(lines), reply_markup=back_to_panel_kb(), parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "admin:giveall")
+async def admin_giveall_menu(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer()
+    text = (
+        "<b>🎁 РАЗДАЧА ВСЕМ</b>\n\n"
+        "<code>/giveall [сумма]</code> — начислить всем незабаненным игрокам\n"
+        "Пример: <code>/giveall 1000</code>\n\n"
+        "Можно использовать отрицательное значение для списания."
+    )
+    await call.message.edit_text(text, reply_markup=back_to_panel_kb(), parse_mode="HTML")
+
+
+@router.message(Command("giveall"))
+async def admin_giveall(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        return await message.answer("Формат: <code>/giveall [сумма]</code>", parse_mode="HTML")
+    try:
+        amount = int(parts[1])
+    except ValueError:
+        return await message.answer("❌ Сумма должна быть целым числом.")
+
+    cursor.execute(
+        "UPDATE users SET balance = MAX(0, balance + ?) WHERE banned = 0", (amount,)
+    )
+    affected = cursor.rowcount
+    conn.commit()
+
+    verb = "начислено" if amount >= 0 else "списано"
+    await message.answer(
+        f"✅ {verb} <b>{abs(amount):,}</b> 💎 у {affected} игроков.", parse_mode="HTML"
     )

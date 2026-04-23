@@ -25,7 +25,6 @@ class PvPState(StatesGroup):
     waiting_bet = State()
     selecting_mode = State()
 
-# === ГЛАВНОЕ МЕНЮ PVP ===
 @router.message(Command("pvp"))
 async def pvp_menu(message: types.Message):
     builder = InlineKeyboardBuilder()
@@ -68,7 +67,6 @@ async def back_to_pvp(call: types.CallbackQuery, state: FSMContext):
     await pvp_menu(call.message)
     await call.answer()
 
-# === ВЫБОР РЕЖИМА ИГРЫ ===
 @router.callback_query(F.data.startswith("pvp_mode:"))
 async def pvp_select_mode(call: types.CallbackQuery, state: FSMContext):
     game_mode = call.data.split(":")[1]
@@ -88,7 +86,6 @@ async def pvp_select_mode(call: types.CallbackQuery, state: FSMContext):
     )
     await state.set_state(PvPState.waiting_bet)
 
-# === СОЗДАНИЕ ИГРЫ ===
 @router.callback_query(F.data == "pvp_create")
 async def pvp_create_start(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text(
@@ -163,7 +160,6 @@ async def pvp_create_process(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-# === СПИСОК ИГР ===
 @router.callback_query(F.data.startswith("pvp_list"))
 async def pvp_list_games(call: types.CallbackQuery):
     # Проверяем, есть ли фильтр по режиму
@@ -239,7 +235,6 @@ async def pvp_list_games(call: types.CallbackQuery):
         parse_mode="Markdown"
     )
 
-# === ОТМЕНА ИГРЫ ===
 @router.callback_query(F.data.startswith("pvp_cancel:"))
 async def pvp_cancel(call: types.CallbackQuery):
     game_id = int(call.data.split(":")[1])
@@ -266,7 +261,6 @@ async def pvp_cancel(call: types.CallbackQuery):
     await call.answer("✅ Игра отменена, деньги возвращены.")
     await pvp_list_games(call)
 
-# === ПРИСОЕДИНЕНИЕ К ИГРЕ ===
 @router.callback_query(F.data.startswith("pvp_join"))
 async def pvp_join(call: types.CallbackQuery):
     is_free = "free" in call.data
@@ -343,7 +337,6 @@ async def pvp_join(call: types.CallbackQuery):
         parse_mode="Markdown"
     )
     
-    # === ИГРОВОЙ ПРОЦЕСС В ЗАВИСИМОСТИ ОТ РЕЖИМА ===
     if game_mode == 'dice':
         await play_dice_game(call, creator_id, joiner_id, bet, is_free, game_id)
     elif game_mode == 'darts':
@@ -353,11 +346,9 @@ async def pvp_join(call: types.CallbackQuery):
     elif game_mode == 'football':
         await play_football_game(call, creator_id, joiner_id, bet, is_free, game_id)
 
-# === ИГРОВЫЕ РЕЖИМЫ ===
 
 async def play_dice_game(call, creator_id, joiner_id, bet, is_free, game_id):
     """Игра в кости - классическая игра"""
-    # --- ХОД ИГРОКА 1 ---
     await asyncio.sleep(2)
     await call.message.answer(
         f"🎲 **ХОД ИГРОКА 1** (Создатель)...\n"
@@ -372,7 +363,6 @@ async def play_dice_game(call, creator_id, joiner_id, bet, is_free, game_id):
     val1 = dice1_msg.dice.value
     await asyncio.sleep(3)
     
-    # --- ХОД ИГРОКА 2 ---
     await call.message.answer(
         f"🎲 **ХОД ИГРОКА 2** (Соперник)...\n"
         f"👤 Игрок: {joiner_id}\n"
@@ -391,7 +381,6 @@ async def play_dice_game(call, creator_id, joiner_id, bet, is_free, game_id):
 
 async def play_darts_game(call, creator_id, joiner_id, bet, is_free, game_id):
     """Игра в дартс - стрельба по мишени"""
-    # --- ХОД ИГРОКА 1 ---
     await asyncio.sleep(2)
     await call.message.answer(
         f"🎯 **ХОД ИГРОКА 1** (Создатель)...\n"
@@ -406,7 +395,6 @@ async def play_darts_game(call, creator_id, joiner_id, bet, is_free, game_id):
     val1 = darts1_msg.dice.value
     await asyncio.sleep(3)
     
-    # --- ХОД ИГРОКА 2 ---
     await call.message.answer(
         f"🎯 **ХОД ИГРОКА 2** (Соперник)...\n"
         f"👤 Игрок: {joiner_id}\n"
@@ -425,7 +413,6 @@ async def play_darts_game(call, creator_id, joiner_id, bet, is_free, game_id):
 
 async def play_basketball_game(call, creator_id, joiner_id, bet, is_free, game_id):
     """Игра в баскетбол - броски в кольцо"""
-    # --- ХОД ИГРОКА 1 ---
     await asyncio.sleep(2)
     await call.message.answer(
         f"🏀 **ХОД ИГРОКА 1** (Создатель)...\n"
@@ -440,7 +427,6 @@ async def play_basketball_game(call, creator_id, joiner_id, bet, is_free, game_i
     val1 = basketball1_msg.dice.value
     await asyncio.sleep(3)
     
-    # --- ХОД ИГРОКА 2 ---
     await call.message.answer(
         f"🏀 **ХОД ИГРОКА 2** (Соперник)...\n"
         f"👤 Игрок: {joiner_id}\n"
@@ -459,7 +445,6 @@ async def play_basketball_game(call, creator_id, joiner_id, bet, is_free, game_i
 
 async def play_football_game(call, creator_id, joiner_id, bet, is_free, game_id):
     """Игра в футбол - удары по воротам"""
-    # --- ХОД ИГРОКА 1 ---
     await asyncio.sleep(2)
     await call.message.answer(
         f"⚽ **ХОД ИГРОКА 1** (Создатель)...\n"
@@ -474,7 +459,6 @@ async def play_football_game(call, creator_id, joiner_id, bet, is_free, game_id)
     val1 = football1_msg.dice.value
     await asyncio.sleep(3)
     
-    # --- ХОД ИГРОКА 2 ---
     await call.message.answer(
         f"⚽ **ХОД ИГРОКА 2** (Соперник)...\n"
         f"👤 Игрок: {joiner_id}\n"
@@ -607,7 +591,6 @@ async def determine_winner(call, creator_id, joiner_id, val1, val2, bet, is_free
     if joiner_id != call.from_user.id:
         await safe_send_message(call.message.bot, joiner_id, msg, parse_mode="Markdown")
 
-# === МОИ ИГРЫ ===
 @router.callback_query(F.data == "pvp_my")
 async def pvp_my_games(call: types.CallbackQuery):
     user_id = call.from_user.id
