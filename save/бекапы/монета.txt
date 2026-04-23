@@ -1,0 +1,99 @@
+import random
+from aiogram import Router, types, F
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+# Импортируем функции БД
+from database import db_get_user, db_update_stats
+
+router = Router()
+
+# Вспомогательная функция проверки пользователя
+async def check_user(message: types.Message):
+    data = db_get_user(message.from_user.id)
+    if not data:
+        return None
+    if data[2] == 1:  # Проверка на бан
+        await message.reply("🚫 Вы заблокированы администрацией.")
+        return None
+    return data
+
+# --- МОНЕТКА ---
+@router.message(Command("flip"))
+async def flip_start(message: types.Message):
+    user_data = await check_user(message)
+    if not user_data: 
+        return
+        
+    args = message.text.split()
+    # Проверка: есть ли ставка и является ли она числом
+    if len(args) < 2 or not args[1].isdigit(): 
+        return await message.reply("📝 Использование: `/flip [ставка]`")
+    
+    bet = int(args[1])
+    
+    if bet <= 0:
+        return await message.reply("❌ Ставка должна быть больше 0.")
+        
+    if bet > user_data[0]: 
+        return await message.reply("❌ Недостаточно средств на балансе.")
+
+    builder = InlineKeyboardBuilder()
+    # f:ставка:выбор:ID_игрока
+    builder.button(text="🦅 Орел", callback_data=f"f:{bet}:heads:{message.from_user.id}")
+    builder.button(text="🪙 Решка", callback_data=f"f:{bet}:tails:{message.from_user.id}")
+    
+    await message.answer(
+        f"🪙 **ИГРА В МОНЕТКУ**\n\n"
+        f"💰 Ваша ставка: {bet:,} 💎\n"
+        f"Выберите сторону:",
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data.startswith("f:"))
+async def flip_proc(call: CallbackQuery):
+    data = call.data.split(":")
+    # Проверка, что на кнопку нажал тот, кто запустил команду
+    owner_id = int(data[3])
+    if call.from_user.id != owner_id:
+        return await call.answer("🚫 Это не ваша игра! Начните свою командой /flip", show_alert=True)
+
+    _, bet, choice, _ = data
+    bet = int(bet)
+    
+    # Получаем актуальные данные пользователя (включая статус подкрутки)
+    u_d = db_get_user(call.from_user.id)
+    
+    # Снова проверяем баланс на момент нажатия кнопки (на случай, если он потратил деньги в другой игре)
+    if u_d[0] < bet:
+        return await call.message.edit_text("❌ Ошибка: на вашем балансе больше нет средств для этой ставки.")
+
+    # Логика результата
+    res = random.choice(["heads", "tails"])
+    
+    # Логика "подкрутки" (индекс 6 в твоей таблице users — поле status)
+    if u_d[6] == 'win': 
+        res = choice
+    elif u_d[6] == 'lose': 
+        res = "tails" if choice == "heads" else "heads"
+
+    # Расчет выигрыша (коэффициент 1.9)
+    if choice == res:
+        win = int(bet * 1.9)
+        result_text = f"🎉 **ВЫИГРЫШ!**\n\n🪙 Выпало: {res.replace('heads','ОРЕЛ').replace('tails','РЕШКА')}\n💰 Вы получили: +{win:,} 💎"
+    else:
+        win = 0
+        result_text = f"💀 **ПРОИГРЫШ**\n\n🪙 Выпало: {res.replace('heads','ОРЕЛ').replace('tails','РЕШКА')}\n💸 Вы потеряли: {bet:,} 💎"
+
+    # Обновляем статистику и баланс
+    db_update_stats(call.from_user.id, bet, win)
+    
+    # Получаем новый баланс для вывода
+    new_bal = db_get_user(call.from_user.id)[0]
+    
+    await call.message.edit_text(
+        f"{result_text}\n💳 Ваш баланс: `{new_bal:,}` 💎",
+        parse_mode="Markdown"
+    )
