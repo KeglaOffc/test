@@ -49,9 +49,20 @@ async def dual_games(message: types.Message):
         await message.reply("❌ Ошибка при выполнении игры.")
 
 async def play_dice_logic(message: types.Message, bet: int, game_type: str, is_reroll=False):
-    # Списываем ставку в начале игры (чтобы не было абуза)
-    cursor.execute("UPDATE users SET balance = balance - ? WHERE id = ?", (bet, message.from_user.id))
-    conn.commit()
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            "UPDATE users SET balance = balance - ? WHERE id = ? AND balance >= ?",
+            (bet, message.from_user.id, bet),
+        )
+        if cursor.rowcount == 0:
+            cursor.execute("ROLLBACK")
+            return await message.reply("❌ Недостаточно средств.")
+        conn.commit()
+    except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("dice/darts: deduction failed")
+        return await message.reply("❌ Ошибка при списании ставки.")
 
     emoji = "🎲" if game_type == "dice" else "🎯"
     user_id = message.from_user.id
