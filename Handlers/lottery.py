@@ -15,8 +15,6 @@ from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 
 
 
-# Настройка логирования для отслеживания действий в лотереях
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- СОСТОЯНИЯ ДЛЯ МАШИНЫ СОСТОЯНИЙ (FSM) ---

@@ -1,14 +1,16 @@
-import time
-import random
 import asyncio
-from aiogram import Router, F, types
+import logging
+import random
+import time
+
+from aiogram import F, Router, types
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
-# Импортируем базу и функции из твоего файла database.py
-from database import cursor, conn, db_get_user 
+from database import conn, cursor, db_get_user
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 SLOT_UPGRADE_PRICE = 10000

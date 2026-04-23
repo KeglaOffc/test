@@ -1,14 +1,24 @@
 import asyncio
-import random
+import logging
 import time
-from aiogram import Router, types, F
+
+from aiogram import F, Router, types
 from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from database import db_get_user, db_update_stats, cursor, conn, get_real_id, db_increment_pvp_wins, db_has_free_games
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from database import (
+    conn,
+    cursor,
+    db_get_user,
+    db_has_free_games,
+    db_increment_pvp_wins,
+    db_update_stats,
+)
 from utils import safe_send_message
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 class PvPState(StatesGroup):

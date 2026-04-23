@@ -1,15 +1,17 @@
-import random
-import asyncio
+import logging
 import os
-from aiogram import Router, types, F
-from aiogram.filters import Command, CommandObject
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from database import db_get_user, db_update_stats, cursor, conn
-from Handlers.common import check_user
-from aiogram.exceptions import TelegramRetryAfter
+import random
 
+from aiogram import F, Router, types
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from database import conn, cursor, db_get_user, db_update_stats
+from Handlers.common import check_user
+
+logger = logging.getLogger(__name__)
 router = Router()
 
 class MinesState(StatesGroup):

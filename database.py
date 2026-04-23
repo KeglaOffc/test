@@ -1,27 +1,18 @@
-"""
-Улучшенный модуль базы данных казино бота.
-Рефактор: исправлены дублирования, улучшена безопасность, добавлены логи.
-"""
+"""Слой доступа к SQLite-базе казино-бота."""
+import logging
 import sqlite3
 import time
-import logging
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Устанавливаем соединение с базой данных
 DB_FILE = "casino_main.db"
 conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 cursor = conn.cursor()
 
-# ============================================================================
-# ИНИЦИАЛИЗАЦИЯ ТАБЛИЦ
-# ============================================================================
 
-def init_tables():
-    """Инициализирует все необходимые таблицы БД"""
+def init_tables() -> None:
+    """Создаёт недостающие таблицы с дефолтными значениями."""
     try:
         # Таблица пользователей
         cursor.execute('''
@@ -188,19 +179,13 @@ def init_tables():
         cursor.execute("INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('maintenance_mode', '0')")
 
         conn.commit()
-        logger.info("[OK] Все таблицы инициализированы успешно")
-        
-        # Применяем миграции для добавления новых колонок
-        apply_migrations()
+        logger.info("Все таблицы инициализированы")
     except Exception as e:
-        logger.error(f"[FAILED] Ошибка при инициализации таблиц: {e}")
+        logger.error("Ошибка при инициализации таблиц: %s", e)
 
-# ============================================================================
-# МИГРАЦИИ БАЗЫ ДАННЫХ
-# ============================================================================
 
-def apply_migrations():
-    """Безопасно добавляет новые колонки без потери данных"""
+def apply_migrations() -> None:
+    """Добавляет новые колонки к существующим таблицам, без потери данных."""
     migrations = [
         ("mining_items", "lvl", "INTEGER DEFAULT 1"),
         ("mining_items", "upgrades", "TEXT DEFAULT ''"),
@@ -230,16 +215,12 @@ def apply_migrations():
         try:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             conn.commit()
-            logger.info(f"[OK] Колонка {column} добавлена в {table}")
+            logger.info("Колонка %s добавлена в %s", column, table)
         except sqlite3.OperationalError as e:
             if "duplicate column name" in str(e):
-                pass  # Колонка уже существует
-            else:
-                logger.error(f"[FAILED] Ошибка в таблице {table}: {e}")
+                continue
+            logger.error("Ошибка в таблице %s: %s", table, e)
 
-# ============================================================================
-# ОСНОВНЫЕ ФУНКЦИИ РАБОТЫ С БД
-# ============================================================================
 
 def get_real_id(target: str) -> Optional[int]:
     """
@@ -252,15 +233,13 @@ def get_real_id(target: str) -> Optional[int]:
         ID пользователя или None
     """
     target = str(target).strip()
-    
-    # Пытаемся как числовой ID
+
     if target.isdigit():
         cursor.execute("SELECT id FROM users WHERE id = ?", (int(target),))
         res = cursor.fetchone()
         if res:
             return res[0]
-    
-    # Пытаемся как custom_id
+
     cursor.execute("SELECT id FROM users WHERE custom_id = ?", (target,))
     res = cursor.fetchone()
     return res[0] if res else None
@@ -288,7 +267,7 @@ def db_get_user(user_id: int) -> List[Any]:
             (user_id, str(user_id), 5000)
         )
         conn.commit()
-        logger.info(f"[INFO] Новый пользователь создан: {user_id}")
+        logger.info("Новый пользователь создан: %s", user_id)
         return [5000, 50, 0, 0, 0, 0, 'off', 0, str(user_id), 0, 0, 0, 0, 0, 0]
     
     return list(res)
@@ -323,43 +302,36 @@ def db_update_stats(user_id: int, bet: int = 0, win: int = 0, deducted: bool = F
     
     final_win = win
     
-    # Применяем буст (x2)
+    # Буст x2
     try:
         if isinstance(boost_end, (int, float)) and boost_end > time.time():
             final_win = int(win * 2)
-            logger.debug(f"[START] Буст активирован для {user_id}")
     except (TypeError, ValueError):
         pass
-    
-    # Кэшбэк 5% (если активирован)
+
+    # Кэшбэк 5%
     if has_cashback and bet > 0:
-        cashback = int(bet * 0.05)
-        final_win += cashback
-        logger.debug(f"[MONEY] Кэшбэк {cashback} для {user_id}")
-    
-    # Страховка ставки (при проигрыше)
+        final_win += int(bet * 0.05)
+
+    # Страховка ставки: при проигрыше возвращает 50%
     if win == 0 and bet > 0 and bet_insure > 0:
-        insured_win = int(bet * 0.5)
-        final_win = insured_win
-        cursor.execute("UPDATE users SET bet_insure = bet_insure - 1 WHERE id = ?", (user_id,))
-        logger.debug(f"[SHIELD] Страховка сработала для {user_id}")
-    
-    # Проверяем максимальный лимит баланса
-    MAX_LIMIT = 900000000000000000
+        final_win = int(bet * 0.5)
+        cursor.execute(
+            "UPDATE users SET bet_insure = bet_insure - 1 WHERE id = ?", (user_id,)
+        )
+
+    MAX_LIMIT = 900_000_000_000_000_000
     
     if deducted:
         new_balance = current_balance + final_win
     else:
         new_balance = current_balance - bet + final_win
     
-    # === ЛОГИКА СЕЙФА (safe_box_level) ===
-    # Сейф защищает от полного обнуления баланса
+    # Сейф защищает часть баланса от обнуления: 20% за уровень
     safe_level = user_data[15] if len(user_data) > 15 else 0
     if new_balance < 0 and safe_level > 0:
-        # Сейф активируется: защищает 20% от базового баланса за каждый уровень
         protected_amount = int(current_balance * 0.2 * safe_level)
         new_balance = max(0, protected_amount)
-        logger.debug(f"[SAFE] Сейф уровня {safe_level} защитил баланс игрока {user_id}")
     
     if new_balance > MAX_LIMIT:
         new_balance = MAX_LIMIT
@@ -417,10 +389,10 @@ def db_ban_user(user_id: int, reason: str = "Нарушение правил") -
     try:
         cursor.execute("UPDATE users SET banned = 1 WHERE id = ?", (user_id,))
         conn.commit()
-        logger.warning(f"[BLOCKED] Пользователь {user_id} заблокирован. Причина: {reason}")
+        logger.warning("Пользователь %s заблокирован. Причина: %s", user_id, reason)
         return True
     except Exception as e:
-        logger.error(f"[FAILED] Ошибка при блокировке: {e}")
+        logger.error("Ошибка при блокировке: %s", e)
         return False
 
 
@@ -429,10 +401,10 @@ def db_unban_user(user_id: int) -> bool:
     try:
         cursor.execute("UPDATE users SET banned = 0 WHERE id = ?", (user_id,))
         conn.commit()
-        logger.info(f"[OK] Пользователь {user_id} разблокирован")
+        logger.info("Пользователь %s разблокирован", user_id)
         return True
     except Exception as e:
-        logger.error(f"[FAILED] Ошибка при разблокировке: {e}")
+        logger.error("Ошибка при разблокировке: %s", e)
         return False
 
 
@@ -457,9 +429,9 @@ def clear_daily_stats():
     try:
         cursor.execute("DELETE FROM daily_stats")
         conn.commit()
-        logger.info("[STATS] Дневная статистика очищена")
+        logger.info("Дневная статистика очищена")
     except Exception as e:
-        logger.error(f"[FAILED] Ошибка при очистке статистики: {e}")
+        logger.error("Ошибка при очистке статистики: %s", e)
 
 
 def set_maintenance_mode(enabled: bool):
@@ -488,20 +460,23 @@ def db_increment_pvp_wins(user_id: int) -> int:
         cursor.execute("SELECT pvp_wins FROM users WHERE id = ?", (user_id,))
         result = cursor.fetchone()
         if not result:
-            logger.warning(f"[PVP] Пользователь {user_id} не найден при попытке увеличить победы")
+            logger.warning("Пользователь %s не найден при увеличении PVP-побед", user_id)
             return 0
-        
+
         new_wins = result[0]
-        
-        # Проверяем достижение 50 побед
         if new_wins == 50:
-            cursor.execute("UPDATE users SET free_games_unlocked = 1 WHERE id = ?", (user_id,))
-            logger.info(f"[PVP] Пользователь {user_id} достиг 50 PVP побед и получил бесплатные игры!")
-        
+            cursor.execute(
+                "UPDATE users SET free_games_unlocked = 1 WHERE id = ?", (user_id,)
+            )
+            logger.info(
+                "Пользователь %s достиг 50 PVP побед и получил бесплатные игры",
+                user_id,
+            )
+
         conn.commit()
         return new_wins
     except Exception as e:
-        logger.error(f"[ERROR] Ошибка при увеличении PVP побед для {user_id}: {e}")
+        logger.error("Ошибка при увеличении PVP-побед для %s: %s", user_id, e)
         conn.rollback()
         return 0
 
@@ -511,12 +486,7 @@ def db_has_free_games(user_id: int) -> bool:
     try:
         cursor.execute("SELECT free_games_unlocked FROM users WHERE id = ?", (user_id,))
         res = cursor.fetchone()
-        return res and res[0] == 1
+        return bool(res and res[0] == 1)
     except Exception as e:
-        logger.error(f"[ERROR] Ошибка при проверке бесплатных игр для {user_id}: {e}")
+        logger.error("Ошибка при проверке бесплатных игр для %s: %s", user_id, e)
         return False
-
-
-# Инициализация при импорте (Убрано, так как вызывается в start.py)
-# init_tables()
-# apply_migrations()
