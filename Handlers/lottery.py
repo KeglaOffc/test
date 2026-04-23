@@ -17,7 +17,6 @@ from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 
 logger = logging.getLogger(__name__)
 
-# --- СОСТОЯНИЯ ДЛЯ МАШИНЫ СОСТОЯНИЙ (FSM) ---
 class CreateLottery(StatesGroup):
     """Класс состояний для пошагового создания пользовательской лотереи."""
     title = State()          # Название розыгрыша
@@ -26,7 +25,6 @@ class CreateLottery(StatesGroup):
     max_tickets = State()    # Общее количество билетов
     confirm = State()        # Подтверждение и оплата
 
-# --- КОНСТАНТЫ И НАСТРОЙКИ СИСТЕМЫ ---
 HOURLY_PRICE = 1000         # Цена билета в часовой лотерее (возросла с 500)
 HOURLY_LIMIT = 10           # Лимит билетов в час для одного игрока
 WEEKLY_PRICE = 7000         # Цена билета в недельной лотерее (возросла с 5000)
@@ -40,20 +38,29 @@ SYSTEM_FEE = 0.05           # Комиссия системы (5%)
 
 router = Router()
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ИНТЕРФЕЙСА ---
+
+SCRATCH_PRICE = 2_500
+SCRATCH_PRIZES = [
+    {"mult": 0,   "weight": 55},
+    {"mult": 1,   "weight": 20},
+    {"mult": 2,   "weight": 15},
+    {"mult": 5,   "weight": 7},
+    {"mult": 20,  "weight": 2},
+    {"mult": 100, "weight": 1},
+]
+
 
 def get_main_kb():
-    """Генерация главного меню лотерейного центра (УПРОЩЕНО)."""
     builder = InlineKeyboardBuilder()
     builder.button(text="🕐 Часовая (1000)", callback_data="view_hourly")
     builder.button(text="📅 Недельная (7000)", callback_data="view_weekly")
     builder.button(text="🐳 МЕГА (150k)", callback_data="view_mega")
+    builder.button(text="🎟 Мгновенная (2 500)", callback_data="view_scratch")
     builder.button(text="🎪 User-лотереи", callback_data="view_user_lotteries")
     builder.button(text="🏠 В профиль", callback_data="back_to_profile")
-    builder.adjust(2, 2, 1)
+    builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
 
-# --- ОБРАБОТЧИКИ ОСНОВНЫХ КОМАНД ---
 
 @router.message(Command("lottery"))
 async def lottery_menu(message: types.Message):
@@ -89,7 +96,109 @@ async def back_to_profile(call: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Error deleting message: {e}")
 
-# --- ЛОГИКА ЧАСОВОЙ ЛОТЕРЕИ ---
+
+def scratch_pull() -> int:
+    weights = [p["weight"] for p in SCRATCH_PRIZES]
+    return random.choices(SCRATCH_PRIZES, weights=weights, k=1)[0]["mult"]
+
+
+def scratch_menu_text() -> str:
+    return (
+        "🎟 <b>Мгновенная лотерея</b>\n"
+        f"Цена: <b>{SCRATCH_PRICE:,}</b> 💎 за билет\n\n"
+        "Выплаты (множитель от цены билета):\n"
+        "• x0 — мимо (55%)\n"
+        "• x1 — возврат (20%)\n"
+        "• x2 (15%)\n"
+        "• x5 (7%)\n"
+        "• x20 (2%)\n"
+        "• x100 (1%) — супер-приз\n\n"
+        "Результат приходит сразу."
+    )
+
+
+def scratch_menu_kb() -> InlineKeyboardBuilder:
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"🎟 Купить 1 билет ({SCRATCH_PRICE:,})", callback_data="scratch:buy:1")
+    kb.button(text=f"🎟 Купить 5 билетов ({SCRATCH_PRICE * 5:,})", callback_data="scratch:buy:5")
+    kb.button(text="🔙 Назад", callback_data="lottery_main")
+    kb.adjust(1)
+    return kb
+
+
+@router.message(Command("scratch"))
+async def scratch_cmd(message: types.Message):
+    if not await check_user(message):
+        return
+    await message.answer(
+        scratch_menu_text(), reply_markup=scratch_menu_kb().as_markup(), parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "view_scratch")
+async def scratch_view(call: types.CallbackQuery):
+    await call.answer()
+    await call.message.edit_text(
+        scratch_menu_text(), reply_markup=scratch_menu_kb().as_markup(), parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("scratch:buy:"))
+async def scratch_buy(call: types.CallbackQuery):
+    await call.answer()
+    count = int(call.data.split(":")[2])
+    if count not in (1, 5):
+        return
+    total_price = SCRATCH_PRICE * count
+    user_id = call.from_user.id
+
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute("SELECT balance FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row or row[0] < total_price:
+            cursor.execute("ROLLBACK")
+            return await call.message.answer(
+                f"❌ Нужно {total_price:,} 💎 для {count} билета(ов)."
+            )
+        cursor.execute(
+            "UPDATE users SET balance = balance - ? WHERE id = ?", (total_price, user_id)
+        )
+
+        lines = []
+        total_win = 0
+        for _ in range(count):
+            mult = scratch_pull()
+            win = SCRATCH_PRICE * mult
+            total_win += win
+            emoji = "🎉" if mult >= 5 else ("✨" if mult >= 1 else "❌")
+            lines.append(f"{emoji} x{mult} → {win:,} 💎")
+
+        if total_win > 0:
+            cursor.execute(
+                "UPDATE users SET balance = balance + ? WHERE id = ?",
+                (total_win, user_id),
+            )
+        conn.commit()
+    except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("scratch: ошибка покупки")
+        return await call.message.answer("❌ Ошибка покупки. Попробуй ещё раз.")
+
+    new_balance = db_get_user(user_id)[0]
+    delta = total_win - total_price
+    text = (
+        f"🎟 <b>Мгновенная лотерея — {count} билет(ов)</b>\n\n"
+        + "\n".join(lines)
+        + f"\n\nИтог: {'+' if delta >= 0 else ''}{delta:,} 💎\n"
+        + f"💳 Баланс: {new_balance:,} 💎"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"🎟 Ещё 1 билет ({SCRATCH_PRICE:,})", callback_data="scratch:buy:1")
+    kb.button(text="🔙 В лотерею", callback_data="lottery_main")
+    kb.adjust(1)
+    await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
 
 @router.message(Command("lothourly"))
 async def fast_hourly(message: types.Message):
@@ -231,7 +340,6 @@ async def buy_hourly_ticket_proc(call: types.CallbackQuery):
         except:
             pass
 
-# --- ЛОГИКА НЕДЕЛЬНОЙ ЛОТЕРЕИ ---
 
 @router.callback_query(F.data == "view_weekly")
 async def cb_view_weekly(call: types.CallbackQuery):
@@ -376,7 +484,6 @@ async def buy_weekly_ticket_proc(call: types.CallbackQuery):
         except:
             pass
 
-# --- ЛОГИКА МЕГА-ЛОТЕРЕИ (НОВАЯ) ---
 
 @router.callback_query(F.data == "view_mega")
 async def cb_view_mega(call: types.CallbackQuery):
@@ -440,7 +547,6 @@ async def buy_mega_ticket_proc(call: types.CallbackQuery):
     if not user:
         return await call.answer("❌ Ошибка при загрузке профиля!", show_alert=True)
     
-    # --- ПРОВЕРКА ЛИМИТОВ ---
     now = datetime.datetime.now()
     start_of_week = int((now - datetime.timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0).timestamp())
     
@@ -470,7 +576,6 @@ async def buy_mega_ticket_proc(call: types.CallbackQuery):
     
     await show_mega(call)
 
-# --- ЛОГИКА ПРО-ЛОТЕРЕИ ---
 async def fast_pro(message: types.Message):
     await show_pro(message)
 
@@ -545,7 +650,6 @@ async def buy_pro_ticket_proc(call: types.CallbackQuery):
     except TelegramBadRequest as e:
         logger.warning(f"Callback timeout при показе результата Про-лотереи: {e}")
 
-# --- ПОЛЬЗОВАТЕЛЬСКИЕ ЛОТЕРЕИ (БАЗОВАЯ ЛОГИКА) ---
 
 @router.message(Command("lotuser"))
 async def fast_user(message: types.Message):
@@ -581,7 +685,6 @@ async def show_user_lots(event):
     else:
         await event.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
-# --- СИСТЕМА СОЗДАНИЯ СВОЕЙ ЛОТЕРЕИ (FSM) ---
 
 @router.callback_query(F.data == "create_user_lottery")
 async def start_creation(call: types.CallbackQuery, state: FSMContext):
@@ -723,7 +826,6 @@ async def finalize_ulot(call: types.CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
 
-# --- ЛОГИКА УЧАСТИЯ В ПОЛЬЗОВАТЕЛЬСКИХ ЛОТЕРЕЯХ ---
 
 @router.callback_query(F.data.startswith("buy_ulot:"))
 async def process_buy_user_ticket(call: types.CallbackQuery):
@@ -740,7 +842,6 @@ async def process_buy_user_ticket(call: types.CallbackQuery):
     user = db_get_user(user_id)
     if user[0] < price: return await call.answer(f"❌ Нужно {price:,} 💎", show_alert=True)
         
-    # --- ЛОГИКА ЗОЛОТОГО БИЛЕТА ---
     cursor.execute("SELECT gold_ticket FROM users WHERE id = ?", (user_id,))
     has_gold = cursor.fetchone()[0]
     entries = 3 if has_gold > 0 else 1 # В БД будет 3 записи этого юзера

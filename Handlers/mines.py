@@ -149,15 +149,12 @@ async def mine_count_input(message: types.Message, state: FSMContext):
     if not (1 <= m_count <= data['max_mines']):
         return await message.reply(f"Недопустимое количество мин (1-{data['max_mines']})")
 
-    # 0. ПРОВЕРКА БАЛАНСА (БЕЗ СПИСАНИЯ ДО ОКОНЧАНИЯ ПОДГОТОВКИ)
     user = db_get_user(message.from_user.id)
     if user[0] < data['bet']:
         return await message.reply("❌ Недостаточно средств! Пополните баланс.")
     
-    # 1. Генерируем позиции мин
     mines_list = random.sample(range(data['total_cells']), m_count)
     
-    # 2. ИСПОЛЬЗУЕМ ТРАНЗАКЦИЮ для списания денег и создания записи в БД
     try:
         cursor.execute("BEGIN IMMEDIATE")
         
@@ -171,7 +168,6 @@ async def mine_count_input(message: types.Message, state: FSMContext):
         # Списываем деньги АТОМАРНО
         cursor.execute("UPDATE users SET balance = balance - ? WHERE id = ?", (data['bet'], message.from_user.id))
         
-        # 3. ЗАПИСЬ в БД для админа
         mines_str = ",".join(map(str, mines_list))
         cursor.execute("""
             INSERT INTO mines_games (user_id, mines_pos, field_size, bet, status) 
@@ -189,10 +185,8 @@ async def mine_count_input(message: types.Message, state: FSMContext):
         logger.error(f"Error in mines transaction: {e}")
         return await message.reply("❌ Ошибка при запуске игры. Попробуйте еще раз.")
     
-    # 3. Сохраняем состояние в FSM для игры
     await state.update_data(mines=mines_list, mine_count=m_count, opened=[], flagged=[], steps=0)
 
-    # 4. АВТО-ОТПРАВКА КАРТЫ АДМИНУ В ЛС
     try:
         admin_id = int(os.getenv("ADMIN_ID", 5030561581))
         side = data['side_size']
@@ -207,7 +201,6 @@ async def mine_count_input(message: types.Message, state: FSMContext):
     except Exception as e:
         print(f"Не удалось отправить инфо админу: {e}")
     
-    # 5. Ответ пользователю и запуск игры
     await message.answer(
         f"🎮 Игра началась!\nСтавка: {data['bet']:,} 💎 | Мин: {m_count}", 
         reply_markup=get_mines_kb(data['side_size'], user_id=message.from_user.id)

@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-# --- ДУЭЛИ (DICE, DARTS) ---
 @router.message(Command("dice", "darts"))
 async def dual_games(message: types.Message):
     try:
@@ -90,7 +89,6 @@ async def play_dice_logic(message: types.Message, bet: int, game_type: str, is_r
     user_final = db_get_user(user_id)
     new_bal = user_final[0]
 
-    # --- КРАСИВЫЙ ВЫВОД БЕЗ ЗВЕЗДОЧЕК ---
     builder = InlineKeyboardBuilder()
     
     if u_v > b_v:
