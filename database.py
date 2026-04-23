@@ -247,29 +247,46 @@ def get_real_id(target: str) -> Optional[int]:
 
 def db_get_user(user_id: int) -> List[Any]:
     """
-    Получает данные пользователя или создает нового.
-    
+    Получает данные пользователя или создаёт нового.
+
     Returns:
-        [balance, rig_prob, banned, total_bets, total_wins, games_played, 
-         rigged_mode, boost_end, custom_id, luck_end, last_bonus]
+        [0  balance,
+         1  rig_prob,
+         2  banned,
+         3  total_bets,
+         4  total_wins,
+         5  games_played,
+         6  rigged_mode,
+         7  boost_end,
+         8  custom_id,
+         9  luck_end,
+         10 last_bonus,
+         11 has_cashback,
+         12 bet_insure,
+         13 pvp_wins,
+         14 free_games_unlocked,
+         15 safe_box_level]
     """
-    cursor.execute("""
-        SELECT balance, rig_prob, banned, total_bets, total_wins, 
-               games_played, rigged_mode, boost_end, custom_id, luck_end, last_bonus, 
-               has_cashback, bet_insure, pvp_wins, free_games_unlocked
+    cursor.execute(
+        """
+        SELECT balance, rig_prob, banned, total_bets, total_wins,
+               games_played, rigged_mode, boost_end, custom_id, luck_end, last_bonus,
+               has_cashback, bet_insure, pvp_wins, free_games_unlocked, safe_box_level
         FROM users WHERE id = ?
-    """, (user_id,))
+        """,
+        (user_id,),
+    )
     res = cursor.fetchone()
-    
+
     if not res:
         cursor.execute(
-            "INSERT INTO users (id, custom_id, balance) VALUES (?, ?, ?)", 
-            (user_id, str(user_id), 5000)
+            "INSERT INTO users (id, custom_id, balance) VALUES (?, ?, ?)",
+            (user_id, str(user_id), 5000),
         )
         conn.commit()
         logger.info("Новый пользователь создан: %s", user_id)
-        return [5000, 50, 0, 0, 0, 0, 'off', 0, str(user_id), 0, 0, 0, 0, 0, 0]
-    
+        return [5000, 50, 0, 0, 0, 0, 'off', 0, str(user_id), 0, 0, 0, 0, 0, 0, 0]
+
     return list(res)
 
 
