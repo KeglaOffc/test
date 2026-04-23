@@ -406,19 +406,17 @@ async def play_slots(message: types.Message):
         return await message.reply("❌ Ставка должна быть числом!")
     
     bet = int(args[1])
-    is_double = len(args) > 2 and args[2].lower() == "double"
-    
+
     is_no_limit = user_data[9] == 777
     if not is_no_limit and bet > 1000000:
         return await message.reply("❌ Максимальная ставка — 1,000,000 💎")
-    
+
     if bet > user_data[0] or bet < 10:
-        return await message.reply(f"❌ Некорректная ставка. Баланс: {user_data[0]:,}")
-    
-    if is_double:
-        await play_double_slots(message, bet, user_data)
-    else:
-        await play_single_slot(message, bet, user_data)
+        return await message.reply(
+            f"❌ Некорректная ставка. Баланс: {user_data[0]:,}"
+        )
+
+    await play_single_slot(message, bet, user_data)
 
 async def play_single_slot(message: types.Message, bet: int, user_data: tuple):
     """Одиночная крутка слота"""
@@ -464,7 +462,7 @@ async def play_single_slot(message: types.Message, bet: int, user_data: tuple):
         
         builder = InlineKeyboardBuilder()
         builder.button(text="🔄 Переиграть", callback_data=f"replay_slot:{bet}")
-        builder.button(text="� В меню", callback_data="back_to_profile")
+        builder.button(text="🏠 В меню", callback_data="back_to_profile")
         builder.adjust(1)
         
         try:
@@ -479,10 +477,6 @@ async def play_single_slot(message: types.Message, bet: int, user_data: tuple):
         logging.error(f"Ошибка в play_single_slot: {str(e)}")
         await message.answer(f"❌ Ошибка в игре слотов: {str(e)}", parse_mode="Markdown")
 
-async def play_double_slots_REMOVED():
-    """Двойной режим удален по запросу пользователя"""
-    pass
-
 @router.callback_query(F.data.startswith("replay_slot:"))
 async def replay_slot(call: types.CallbackQuery):
     bet = int(call.data.split(":")[1])
@@ -492,9 +486,7 @@ async def replay_slot(call: types.CallbackQuery):
     
     await play_single_slot(call.message, bet, user_data)
 
-# Двойной режим полностью удален по запросу
-
-# === ОБРАБОТЧИК ДЛЯ КНОПКИ "В МЕНЮ" ===
+# === Обработчик кнопки "В меню" ===
 @router.callback_query(F.data == "back_to_profile")
 async def go_back_to_profile(call: types.CallbackQuery, state: FSMContext):
     """Возврат в профиль и удаление игрового сообщения"""

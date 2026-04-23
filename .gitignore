@@ -1,0 +1,28 @@
+# Byte-compiled / cached
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtualenvs
+venv/
+env/
+.venv/
+
+# Environment
+.env
+.env.local
+
+# Databases (runtime state)
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs and PID files
+*.log
+*.pid
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
