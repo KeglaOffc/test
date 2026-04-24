@@ -6,7 +6,13 @@ from aiogram import F, Router, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from database import conn, cursor, db_get_user
+from database import (
+    ROLE_LABELS,
+    conn,
+    cursor,
+    db_get_role,
+    db_get_user,
+)
 from utils import safe_reply_message
 
 logger = logging.getLogger(__name__)
@@ -39,7 +45,7 @@ async def cmd_help(message: types.Message):
         "🎰 **АЗАРТНЫЕ ИГРЫ:**\n"
         "• `/slot [сумма]` — Слоты (до x30 на 777)\n"
         "• `/roulette [сумма]` — Европейская рулетка\n"
-        "• `/mines [сумма] [бомбы]` — Сапёр\n"
+        "• `/mines [сумма]` — Сапёр (размер и бомбы — в меню)\n"
         "• `/flip [сумма]` — Орёл или решка (x1.9 / x5)\n"
         "• `/chests [сумма]` — Сундуки удачи\n"
         "• `/crash` — Краш-игра\n"
@@ -65,6 +71,11 @@ def _render_profile(u: dict, user_id: int) -> str:
     
     aura = "✨" if u.get('aura_active') == 1 else ""
     vip = "👑" if u['rigged_mode'] == 'vip' else ""
+    tag = u.get('cosmetic_tag') or ""
+    role_label = ROLE_LABELS.get(db_get_role(user_id), "")
+    priv = (u.get('privilege') or 'none')
+    priv_badge = {"bronze": "🥉 VIP-Bronze", "silver": "🥈 VIP-Silver", "gold": "🥇 VIP-Gold"}.get(priv, "")
+    header_badges = " ".join(x for x in (role_label, priv_badge, tag) if x)
 
     if u['boost_end'] > now:
         boost_time = (u['boost_end'] - now) // 3600
@@ -97,9 +108,11 @@ def _render_profile(u: dict, user_id: int) -> str:
     free_games_status = "🏆" if u.get('free_games_unlocked', 0) == 1 else "📊"
     pvp_status = f"{free_games_status} {pvp_wins}/50 побед" if pvp_wins < 50 else f"🏆 {pvp_wins} побед - ВИП!"
 
+    badges_line = f"{header_badges}\n" if header_badges else ""
     return (
         f"{aura} **ЛИЧНЫЙ КАБИНЕТ** {vip}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
+        f"{badges_line}"
         f"👤 **Игрок:** `{u['custom_id'] or u['id']}`\n"
         f"🔢 **ID:** `{user_id}`\n"
         f"💳 **Баланс:** `{u['balance']:,}` 💎\n"
@@ -153,7 +166,9 @@ async def cb_go_start(call: types.CallbackQuery):
 SHOP_CATALOG = {
     # Бусты и удача
     "boost_x2":     {"cat": "boosts", "price": 100_000,   "title": "🔥 X2 Буст 24ч",       "desc": "Все выигрыши удваиваются на 24 часа."},
+    "boost_x3":     {"cat": "boosts", "price": 250_000,   "title": "⚡️ X3 Буст 3ч",        "desc": "Выигрыши утраиваются на 3 часа."},
     "clover":       {"cat": "boosts", "price": 500_000,   "title": "🍀 Клевер удачи",       "desc": "+5% к базовому шансу выигрыша (стакается, максимум 95%)."},
+    "lucky_roll":   {"cat": "boosts", "price": 80_000,    "title": "🎯 Лаки-ролл +2%",      "desc": "+2% к шансу. Можно докупить до 5 штук (+10% суммарно)."},
     "no_limit":     {"cat": "boosts", "price": 500_000,   "title": "📈 Безлимит ставок",    "desc": "Снимает потолок ставки в 1 млн. Один раз."},
 
     # Инвентарь
@@ -164,6 +179,8 @@ SHOP_CATALOG = {
     "safe_box":     {"cat": "inv", "price": 400_000,  "title": "🏦 Сейф (уровень +1)",  "desc": "Защищает 20% баланса за уровень. До 5 уровней."},
     "gold_ticket":  {"cat": "inv", "price": 120_000,  "title": "🎟 Золотой билет",      "desc": "Утраивает джекпот, если выпал в лотерее. До 5 шт."},
     "energy_drink": {"cat": "inv", "price": 60_000,   "title": "⚡️ Энергетик",          "desc": "Сбрасывает КД на /bonus. До 10 шт."},
+    "wheel_token":  {"cat": "inv", "price": 40_000,   "title": "🎡 Жетон колеса",       "desc": "Даёт один бесплатный спин на /wheel. До 10 шт."},
+    "auto_collect": {"cat": "inv", "price": 300_000,  "title": "🤖 Автосбор 24ч",       "desc": "Раз в час авто-забирает доход на ферме 24 часа."},
 
     # Привилегии
     "vip_bronze":   {"cat": "priv", "price": 500_000,    "title": "🥉 VIP-BRONZE",   "desc": "Бейдж + +2% к кэшбэку на всех играх."},
@@ -172,15 +189,26 @@ SHOP_CATALOG = {
     "vip":          {"cat": "priv", "price": 1_000_000,  "title": "💎 VIP-классик",   "desc": "Старый пожизненный VIP-бейдж без процентов."},
     "incognito":    {"cat": "priv", "price": 180_000,   "title": "🕵️ Режим невидимки",  "desc": "Прячет тебя из /top. Включается один раз."},
 
+    # Косметика (теги)
+    "tag_flame":    {"cat": "cosm", "price": 200_000,   "title": "🔥 Тег «Flame»",        "desc": "Декоративный тег у ника в /start."},
+    "tag_diamond":  {"cat": "cosm", "price": 500_000,   "title": "💎 Тег «Diamond»",      "desc": "Декоративный тег у ника в /start."},
+    "tag_shark":    {"cat": "cosm", "price": 1_500_000, "title": "🦈 Тег «Shark»",        "desc": "Для серьёзных катал."},
+    "tag_star":     {"cat": "cosm", "price": 3_000_000, "title": "⭐ Тег «Star»",         "desc": "Светится ярче остальных."},
+    "aura":         {"cat": "cosm", "price": 800_000,   "title": "✨ Аура",               "desc": "Включает префикс «✨» в профиле."},
+
     # Сюрпризы
-    "lootbox":      {"cat": "fun", "price": 150_000,   "title": "🎁 Лут-бокс",        "desc": "Случайный приз: монеты, бусты или предметы."},
-    "scratch_pack": {"cat": "fun", "price": 25_000,    "title": "🎟 Пачка скретчей x3", "desc": "Три мгновенных скретч-билета по цене двух."},
+    "lootbox":      {"cat": "fun", "price": 150_000,   "title": "🎁 Лут-бокс",          "desc": "Случайный приз: монеты, бусты или предметы."},
+    "scratch_pack": {"cat": "fun", "price": 25_000,    "title": "🎟 Пачка скретчей x3",  "desc": "Три мгновенных скретч-билета по цене двух."},
+    "starter_pack": {"cat": "fun", "price": 120_000,   "title": "🎒 Набор новичка",      "desc": "2 щита + 3 сканера + 2 скретча + 1 энергетик. Один раз."},
+    "mystery_box":  {"cat": "fun", "price": 1_000_000, "title": "🕶 Тёмный ящик",        "desc": "Случайный приз от 100 000 до 3 000 000 💎."},
+    "lotto_pack":   {"cat": "fun", "price": 5_000,     "title": "🎫 Лото-пак",           "desc": "3 часовых билета одним свёртком (дешевле, чем поштучно)."},
 }
 
 CATEGORY_LABELS = {
     "boosts": "🔥 Бусты",
     "inv":    "🎒 Инвентарь",
     "priv":   "👑 Привилегии",
+    "cosm":   "🎨 Косметика",
     "fun":    "🎁 Сюрпризы",
 }
 
@@ -196,6 +224,16 @@ STACK_LIMITS = {
     "gold_ticket": 5,
     "energy_drink": 10,
     "scratch_pack": 20,
+    "wheel_token": 10,
+    "lucky_roll": 5,
+}
+
+ONE_TIME = {"tag_flame", "tag_diamond", "tag_shark", "tag_star", "aura", "starter_pack", "auto_collect"}
+TAG_EMOJI = {
+    "tag_flame": "🔥",
+    "tag_diamond": "💎",
+    "tag_shark": "🦈",
+    "tag_star": "⭐",
 }
 
 
@@ -397,6 +435,15 @@ def _check_already_owns(item: str, uid: int) -> str | None:
         return "Безлимит уже активирован — покупка заблокирована."
     if item == "incognito" and u.get("incognito_mode") == 1:
         return "Режим невидимки уже включён — покупка заблокирована."
+    if item == "aura" and u.get("aura_active") == 1:
+        return "Аура уже активна — покупка заблокирована."
+    if item in TAG_EMOJI and (u.get("cosmetic_tag") or "") == TAG_EMOJI[item]:
+        return "Этот тег уже установлен."
+    if item == "starter_pack" and u.get("starter_pack_used", 0) == 1:
+        return "Набор новичка можно купить только один раз."
+    if item == "auto_collect":
+        if (u.get("auto_collect_end", 0) or 0) > int(time.time()):
+            return "Автосбор ещё активен. Можно купить после истечения."
     if item in ("vip_bronze", "vip_silver", "vip_gold"):
         tier = item.split("_", 1)[1]
         current = u.get("privilege", "none") or "none"
@@ -438,11 +485,24 @@ def _apply_purchase(item: str, uid: int) -> tuple[bool, str]:
 
         if item == "boost_x2":
             boost_until = int(time.time()) + 24 * 3600
-            cursor.execute("UPDATE users SET boost_end = ? WHERE id = ?", (boost_until, uid))
+            cursor.execute(
+                "UPDATE users SET boost_end = ?, boost_mult = 2 WHERE id = ?",
+                (boost_until, uid),
+            )
             msg = "🔥 Буст x2 активирован на 24 часа."
+        elif item == "boost_x3":
+            boost_until = int(time.time()) + 3 * 3600
+            cursor.execute(
+                "UPDATE users SET boost_end = ?, boost_mult = 3 WHERE id = ?",
+                (boost_until, uid),
+            )
+            msg = "⚡️ Буст x3 активирован на 3 часа."
         elif item == "clover":
             cursor.execute("UPDATE users SET rig_prob = MIN(rig_prob + 5, 95) WHERE id = ?", (uid,))
             msg = "🍀 Клевер применён. Удача +5% (макс 95%)."
+        elif item == "lucky_roll":
+            cursor.execute("UPDATE users SET rig_prob = MIN(rig_prob + 2, 95) WHERE id = ?", (uid,))
+            msg = "🎯 Лаки-ролл применён. Удача +2%."
         elif item == "vip":
             cursor.execute("UPDATE users SET rigged_mode = 'vip' WHERE id = ?", (uid,))
             msg = "💎 Тебе выдан VIP-статус."
@@ -489,6 +549,39 @@ def _apply_purchase(item: str, uid: int) -> tuple[bool, str]:
         elif item == "lootbox":
             prize_msg = _open_lootbox(uid)
             msg = f"🎁 Лут-бокс вскрыт: {prize_msg}"
+        elif item == "wheel_token":
+            cursor.execute("UPDATE users SET wheel_token = COALESCE(wheel_token, 0) + 1 WHERE id = ?", (uid,))
+            msg = "🎡 Жетон колеса добавлен."
+        elif item == "auto_collect":
+            until = int(time.time()) + 24 * 3600
+            cursor.execute("UPDATE users SET auto_collect_end = ? WHERE id = ?", (until, uid))
+            msg = "🤖 Автосбор активен 24 часа. Доход будет сниматься автоматически."
+        elif item in TAG_EMOJI:
+            cursor.execute("UPDATE users SET cosmetic_tag = ? WHERE id = ?", (TAG_EMOJI[item], uid))
+            msg = f"{TAG_EMOJI[item]} Тег установлен. Будет отображаться в профиле."
+        elif item == "aura":
+            cursor.execute("UPDATE users SET aura_active = 1 WHERE id = ?", (uid,))
+            msg = "✨ Аура активирована — префикс появится в профиле."
+        elif item == "starter_pack":
+            cursor.execute(
+                "UPDATE users SET "
+                "mine_shield = COALESCE(mine_shield, 0) + 2, "
+                "mine_scan = COALESCE(mine_scan, 0) + 3, "
+                "scratch_pack = COALESCE(scratch_pack, 0) + 2, "
+                "energy_drink = COALESCE(energy_drink, 0) + 1, "
+                "starter_pack_used = 1 "
+                "WHERE id = ?",
+                (uid,),
+            )
+            msg = "🎒 Набор новичка выдан: 2 щита, 3 сканера, 2 скретча, 1 энергетик."
+        elif item == "mystery_box":
+            import random as _r
+            amount = _r.randint(100_000, 3_000_000)
+            cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (amount, uid))
+            msg = f"🕶 Внутри оказалось: {amount:,} 💎."
+        elif item == "lotto_pack":
+            cursor.execute("UPDATE users SET lotto_pack = COALESCE(lotto_pack, 0) + 3 WHERE id = ?", (uid,))
+            msg = "🎫 3 часовых лотерейных билета добавлены (см. /lottery)."
         else:
             cursor.execute("ROLLBACK")
             return False, "❌ Неизвестный предмет."

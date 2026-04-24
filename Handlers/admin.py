@@ -13,17 +13,20 @@ from database import (
     conn,
     cursor,
     db_get_global_stats,
+    db_get_role,
     db_get_user,
     db_set_rig,
+    db_set_role,
     get_maintenance_mode,
     get_real_id,
+    is_admin_or_higher,
     set_maintenance_mode,
 )
 from Handlers.mining import CATALOG as MINING_CATALOG
 
 router = Router()
 
-ADMIN_ID = int(os.getenv("ADMIN_ID", "5030561581"))
+OWNER_ID = int(os.getenv("ADMIN_ID", "5030561581"))
 
 ALLOWED_ITEMS = (
     "mine_shield",
@@ -36,7 +39,11 @@ ALLOWED_ITEMS = (
 
 
 def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+    return is_admin_or_higher(user_id)
+
+
+def is_owner(user_id: int) -> bool:
+    return user_id == OWNER_ID or db_get_role(user_id) == "owner"
 
 
 def back_to_panel_kb() -> types.InlineKeyboardMarkup:
@@ -68,12 +75,13 @@ def build_admin_panel():
     builder.button(text="🏆 Топ", callback_data="admin:top")
     builder.button(text="📈 Статистика", callback_data="admin:stats")
     builder.button(text="🎁 Раздача всем", callback_data="admin:giveall")
+    builder.button(text="🏷 Роли", callback_data="admin:roles")
 
     is_maint = get_maintenance_mode()
     maint_text = "🔴 Тех. работы: ВКЛ" if is_maint else "🟢 Тех. работы: ВЫКЛ"
     builder.button(text=maint_text, callback_data="admin:toggle_maintenance")
 
-    builder.adjust(2, 2, 2, 2, 2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 2, 2, 2, 2, 2, 1)
 
     text = (
         "👑 <b>АДМИН-ПАНЕЛЬ</b>\n"
@@ -550,6 +558,76 @@ async def admin_cd_menu(call: types.CallbackQuery):
         "<code>/resetcd [ID|ник]</code> — сбрасывает КД на /bonus и /wheel\n"
     )
     await call.message.edit_text(text, reply_markup=back_to_panel_kb(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:roles")
+async def admin_roles_menu(call: types.CallbackQuery):
+    if not is_owner(call.from_user.id):
+        return await call.answer("Только для OWNER.", show_alert=True)
+    cursor.execute(
+        "SELECT id, custom_id, role FROM users WHERE role IN ('admin', 'helper') ORDER BY role DESC, id"
+    )
+    rows = cursor.fetchall() or []
+    staff_lines = []
+    for uid, nick, role in rows:
+        label = "🛡 ADMIN" if role == "admin" else "🎧 HELPER"
+        name = f"@{nick}" if nick else f"<code>{uid}</code>"
+        staff_lines.append(f"{label} — {name} (id <code>{uid}</code>)")
+    staff = "\n".join(staff_lines) if staff_lines else "— пусто —"
+    text = (
+        "<b>🏷 УПРАВЛЕНИЕ РОЛЯМИ</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Роли:\n"
+        "👑 <b>OWNER</b> — только ты (из env <code>ADMIN_ID</code>).\n"
+        "🛡 <b>ADMIN</b> — все админ-команды, кроме смены ролей.\n"
+        "🎧 <b>HELPER</b> — просмотр инфы игроков, бан/разбан, рассылка.\n"
+        "— <b>PLAYER</b> — обычный игрок.\n\n"
+        "Команды:\n"
+        "<code>/setrole &lt;id|ник&gt; &lt;owner|admin|helper|player&gt;</code>\n"
+        "<code>/staff</code> — показать список персонала.\n\n"
+        f"<b>Текущий состав:</b>\n{staff}"
+    )
+    await call.message.edit_text(text, reply_markup=back_to_panel_kb(), parse_mode="HTML")
+
+
+@router.message(Command("setrole"))
+async def cmd_setrole(message: types.Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        return await message.answer(
+            "Формат: <code>/setrole &lt;id|ник&gt; &lt;owner|admin|helper|player&gt;</code>",
+            parse_mode="HTML",
+        )
+    target = parts[1]
+    role = parts[2].lower().strip()
+    real_id = get_real_id(target)
+    if not real_id:
+        return await message.answer("❌ Игрок не найден.")
+    if role == "owner":
+        return await message.answer("Owner назначается только через env <code>ADMIN_ID</code>.", parse_mode="HTML")
+    if not db_set_role(real_id, role):
+        return await message.answer("❌ Не удалось. Допустимо: admin / helper / player.")
+    await message.answer(f"✅ Роль для <code>{real_id}</code> установлена: <b>{role}</b>.", parse_mode="HTML")
+
+
+@router.message(Command("staff"))
+async def cmd_staff(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    cursor.execute(
+        "SELECT id, custom_id, role FROM users WHERE role IN ('admin', 'helper') ORDER BY role DESC, id"
+    )
+    rows = cursor.fetchall() or []
+    if not rows:
+        return await message.answer("Список персонала пуст.")
+    lines = [f"👑 OWNER — <code>{OWNER_ID}</code>"]
+    for uid, nick, role in rows:
+        tag = "🛡 ADMIN" if role == "admin" else "🎧 HELPER"
+        name = f"@{nick}" if nick else f"<code>{uid}</code>"
+        lines.append(f"{tag} — {name} (id <code>{uid}</code>)")
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "admin:econ")
