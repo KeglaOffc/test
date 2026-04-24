@@ -247,6 +247,7 @@ def apply_migrations() -> None:
         ("users", "boost_mult", "INTEGER DEFAULT 2"),
         ("users", "starter_pack_used", "INTEGER DEFAULT 0"),
         ("users", "lotto_pack", "INTEGER DEFAULT 0"),
+        ("users", "priv_end", "INTEGER DEFAULT 0"),
     ]
 
     for table, column, definition in migrations:
@@ -375,6 +376,15 @@ def db_update_stats(user_id: int, bet: int = 0, win: int = 0, deducted: bool = F
     except (TypeError, ValueError):
         pass
 
+    # Ивент-множители выигрыша (по всем играм сразу)
+    try:
+        from Handlers.events import active_win_multiplier  # lazy import
+        ev_mult = active_win_multiplier("all")
+        if ev_mult and ev_mult != 1.0 and final_win > 0:
+            final_win = int(final_win * ev_mult)
+    except Exception:
+        pass
+
     # Кэшбэк 5% (от клевера / буста из магазина)
     if has_cashback and bet > 0:
         final_win += int(bet * 0.05)
@@ -427,6 +437,26 @@ def db_update_stats(user_id: int, bet: int = 0, win: int = 0, deducted: bool = F
     """, (user_id, net_profit, net_profit))
     
     conn.commit()
+
+    # XP для боевого пропуска: 10 XP за ставку + 1 XP за каждые 1k 💎 в ставке
+    if bet > 0:
+        try:
+            from Handlers.battlepass import add_xp as _bp_xp  # lazy
+            _bp_xp(user_id, 10 + bet // 1000)
+        except Exception:
+            pass
+        # XP клана из ивента
+        try:
+            from Handlers.clans import add_clan_xp as _clan_xp
+            from Handlers.events import active_events as _ae
+            mult = 1.0
+            for ev in _ae():
+                if ev["kind"] == "clan_xp_mult":
+                    mult = max(mult, float(ev.get("value") or 1.0))
+            _clan_xp(user_id, int((5 + bet // 1000) * mult))
+        except Exception:
+            pass
+
     return new_balance
 
 

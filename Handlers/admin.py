@@ -76,12 +76,13 @@ def build_admin_panel():
     builder.button(text="📈 Статистика", callback_data="admin:stats")
     builder.button(text="🎁 Раздача всем", callback_data="admin:giveall")
     builder.button(text="🏷 Роли", callback_data="admin:roles")
+    builder.button(text="🎉 Ивенты", callback_data="admin:events")
 
     is_maint = get_maintenance_mode()
     maint_text = "🔴 Тех. работы: ВКЛ" if is_maint else "🟢 Тех. работы: ВЫКЛ"
     builder.button(text=maint_text, callback_data="admin:toggle_maintenance")
 
-    builder.adjust(2, 2, 2, 2, 2, 2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 2, 2, 2, 2, 2, 2, 1)
 
     text = (
         "👑 <b>АДМИН-ПАНЕЛЬ</b>\n"
