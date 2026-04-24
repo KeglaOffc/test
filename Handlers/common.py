@@ -1,3 +1,4 @@
+import logging
 import time
 
 from aiogram import F, Router, types
@@ -7,6 +8,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database import conn, cursor, db_get_user
 from utils import safe_reply_message
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 
@@ -58,11 +60,15 @@ async def cmd_help(message: types.Message):
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    
+
+    db_get_user(user_id)
+
     cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
     row = cursor.fetchone()
     if not row:
-        return await message.answer("❌ Профиль не найден. Начните с /start")
+        return await message.answer(
+            "❌ Не удалось создать профиль. Попробуй ещё раз через минуту."
+        )
 
     columns = [description[0] for description in cursor.description]
     u = dict(zip(columns, row))
@@ -131,205 +137,287 @@ async def cmd_start(message: types.Message):
     
     await safe_reply_message(message, text, parse_mode="Markdown")
 
+SHOP_CATALOG = {
+    "boost_x2":     {"price": 100_000,   "title": "🔥 X2 Буст 24ч",       "desc": "Все выигрыши удваиваются на 24 часа."},
+    "clover":       {"price": 500_000,   "title": "🍀 Клевер удачи",       "desc": "+5% к базовому шансу выигрыша (стакается)."},
+    "vip":          {"price": 1_000_000, "title": "💎 VIP-статус",          "desc": "Пожизненный VIP-бейдж. Один раз."},
+    "no_limit":     {"price": 500_000,   "title": "📈 Безлимит ставок",    "desc": "Снимает потолок ставки в 1 млн."},
+    "mine_shield":  {"price": 50_000,    "title": "🛡 Саперный щит",       "desc": "Спасает один взрыв в /mines. До 10 шт."},
+    "mine_scan":    {"price": 80_000,    "title": "🔍 Сканер мин",         "desc": "Подсвечивает одну мину в /mines. Пачка из 3. До 15 шт."},
+    "dice_reroll":  {"price": 40_000,    "title": "🔄 Переброс кубика",    "desc": "Перекинуть результат в /dice и /darts. До 10 шт."},
+    "bet_insure":   {"price": 150_000,   "title": "🃏 Страховка ставки",   "desc": "При проигрыше возвращает 50% ставки. До 10 шт."},
+    "safe_box":     {"price": 400_000,   "title": "🏦 Сейф (уровень +1)",  "desc": "Защищает 20% баланса за уровень. До 5 уровней."},
+    "gold_ticket":  {"price": 120_000,   "title": "🎟 Золотой билет",      "desc": "Утраивает джекпот, если выпал в лотерее. До 5 шт."},
+    "energy_drink": {"price": 60_000,    "title": "⚡️ Энергетик",          "desc": "Сбрасывает КД на /bonus. До 10 шт."},
+    "incognito":    {"price": 180_000,   "title": "🕵️ Режим невидимки",    "desc": "Прячет тебя в /top. Включается один раз."},
+}
+
+STACK_LIMITS = {
+    "mine_shield": 10,
+    "mine_scan": 15,
+    "dice_reroll": 10,
+    "bet_insure": 10,
+    "safe_box": 5,
+    "gold_ticket": 5,
+    "energy_drink": 10,
+}
+
+
+def _render_shop(balance: int) -> tuple[str, types.InlineKeyboardMarkup]:
+    builder = InlineKeyboardBuilder()
+    for key, meta in SHOP_CATALOG.items():
+        builder.button(
+            text=f"{meta['title']} · {meta['price']:,} 💎",
+            callback_data=f"buy:{key}",
+        )
+    builder.adjust(1)
+    text = (
+        "🛒 <b>МАГАЗИН</b>\n"
+        f"💳 Баланс: <b>{balance:,}</b> 💎\n\n"
+        "Нажми на предмет — покажу описание и предложу купить."
+    )
+    return text, builder.as_markup()
+
+
 @router.message(Command("shop"))
 @router.callback_query(F.data == "shop:back")
 async def shop_cmd(event: types.Message | types.CallbackQuery):
-    builder = InlineKeyboardBuilder()
-    # Премиум / статус
-    builder.button(text="🔥 X2 Буст 24ч (100к)", callback_data="buy:boost_x2")
-    builder.button(text="👑 Смена ID (100к)", callback_data="buy:id_change")
-    builder.button(text="🍀 Клевер (500к)", callback_data="buy:clover")
-    builder.button(text="💎 VIP-статус (1М)", callback_data="buy:vip")
-    builder.button(text="📈 Безлимит (500к)", callback_data="buy:no_limit")
-    # Mines
-    builder.button(text="🛡 Саперный щит (50к)", callback_data="buy:mine_shield")
-    builder.button(text="🔍 Сканер мин (80к)", callback_data="buy:mine_scan")
-    # Казино
-    builder.button(text="🔄 Переброс кубика (40к)", callback_data="buy:dice_reroll")
-    builder.button(text="🃏 Страховка ставки (150к)", callback_data="buy:bet_insure")
-    # Экономика
-    builder.button(text="🏦 Сейф (400к)", callback_data="buy:safe_box")
-    # Лотерея
-    builder.button(text="🎟 Золотой билет (120к)", callback_data="buy:gold_ticket")
-    # Перезарядка
-    builder.button(text="⚡️ Энергетик (60к)", callback_data="buy:energy_drink")
-    # Социальные
-    builder.button(text="🕵️ Невидимка (180к)", callback_data="buy:incognito")
-
-    builder.adjust(1)
-
-    text = (
-        "🛒 <b>МАГАЗИН БОНУСОВ</b>\n\nВыберите товар для покупки:"
-    )
+    uid = event.from_user.id
+    u = db_get_user(uid)
+    if not u:
+        if isinstance(event, types.CallbackQuery):
+            return await event.answer("Не удалось загрузить профиль.", show_alert=True)
+        return await event.answer("❌ Не удалось загрузить профиль.")
+    text, markup = _render_shop(u[0])
 
     if isinstance(event, types.CallbackQuery):
-        await event.message.edit_text(
-            text, reply_markup=builder.as_markup(), parse_mode="HTML"
-        )
+        await event.answer()
+        try:
+            await event.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            await event.message.answer(text, reply_markup=markup, parse_mode="HTML")
     else:
-        await event.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+        await event.answer(text, reply_markup=markup, parse_mode="HTML")
+
 
 @router.callback_query(F.data.startswith("buy:"))
-async def process_buy(call: types.CallbackQuery):
-    user_id = call.from_user.id
-    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+async def buy_preview(call: types.CallbackQuery):
+    await call.answer()
+    item = call.data.split(":", 1)[1]
+    meta = SHOP_CATALOG.get(item)
+    if not meta:
+        return await call.answer("❌ Такого предмета нет.", show_alert=True)
+
+    uid = call.from_user.id
+    u = db_get_user(uid)
+    if not u:
+        return await call.answer("Ошибка загрузки профиля.", show_alert=True)
+
+    status_hint = _check_already_owns(item, uid)
+    text = (
+        f"<b>{meta['title']}</b>\n"
+        f"Цена: <b>{meta['price']:,}</b> 💎\n\n"
+        f"{meta['desc']}\n"
+    )
+    if status_hint:
+        text += f"\n⚠️ {status_hint}"
+    text += f"\n💳 Твой баланс: {u[0]:,} 💎"
+
+    kb = InlineKeyboardBuilder()
+    if not status_hint or status_hint.startswith("У тебя уже"):
+        kb.button(text="💸 Купить", callback_data=f"confirm_buy:{item}")
+    kb.button(text="⬅️ Назад", callback_data="shop:back")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+def _check_already_owns(item: str, uid: int) -> str | None:
+    """Вернёт предупреждение, если предмет уже нельзя покупать (или достигнут предел стэка)."""
+    cursor.execute("SELECT * FROM users WHERE id = ?", (uid,))
     row = cursor.fetchone()
     if not row:
-        return await call.answer("Ошибка: профиль не найден")
+        return None
+    cols = [d[0] for d in cursor.description]
+    u = dict(zip(cols, row))
 
-    columns = [description[0] for description in cursor.description]
-    u = dict(zip(columns, row))
-    item = call.data.split(":")[1]
-
-    prices = {
-        "boost_x2": 100_000,
-        "id_change": 100_000,
-        "clover": 500_000,
-        "vip": 1_000_000,
-        "no_limit": 500_000,
-        "mine_shield": 50_000,
-        "mine_scan": 80_000,
-        "dice_reroll": 40_000,
-        "bet_insure": 150_000,
-        "safe_box": 400_000,
-        "gold_ticket": 120_000,
-        "energy_drink": 60_000,
-        "incognito": 180_000,
-    }
-
-    if item not in prices:
-        return await call.answer("❌ Неизвестный предмет!", show_alert=True)
-
-    price = prices[item]
-    if u.get('balance', 0) < price:
-        return await call.answer(
-            f"❌ Недостаточно средств! Нужно {price:,} 💸", show_alert=True
-        )
-
-    success_text = "✅ Покупка совершена!"
-
+    if item == "vip" and u.get("rigged_mode") == "vip":
+        return "У тебя уже VIP-статус — покупка заблокирована."
+    if item == "no_limit" and u.get("luck_end") == 777:
+        return "Безлимит уже активирован — покупка заблокирована."
+    if item == "incognito" and u.get("incognito_mode") == 1:
+        return "Режим невидимки уже включён — покупка заблокирована."
     if item == "boost_x2":
         now = int(time.time())
-        boost_until = now + (24 * 3600)
-        cursor.execute("UPDATE users SET balance = balance - ?, boost_end = ? WHERE id = ?", 
-                      (price, boost_until, user_id))
-        success_text = "✅ Активирован <b>X2 Буст на 24 часа</b>! Все выигрыши удвоены."
-    
-    elif item == "id_change":
-        success_text = (
-            "📝 <b>Как сменить ID:</b>\n\n"
-            "Используйте команду: <code>/newid [Имя]</code>\n"
-            "Стоимость: <b>100,000 💎</b> (списывается при вводе команды)."
+        boost_end = u.get("boost_end", 0) or 0
+        if boost_end > now:
+            left = (boost_end - now) // 3600
+            return f"Буст ещё активен (~{left} ч). Можно купить ещё — таймер сбросится на 24 ч."
+
+    limit = STACK_LIMITS.get(item)
+    if limit is not None:
+        have = u.get(item if item != "safe_box" else "safe_box_level", 0) or 0
+        if have >= limit:
+            return f"Достигнут лимит ({limit} шт.) — покупка недоступна."
+    return None
+
+
+def _apply_purchase(item: str, uid: int) -> tuple[bool, str]:
+    """Атомарное списание баланса + эффект. Возвращает (успех, сообщение)."""
+    meta = SHOP_CATALOG[item]
+    price = meta["price"]
+
+    blocker = _check_already_owns(item, uid)
+    if blocker and not blocker.startswith("Буст ещё активен"):
+        return False, f"⚠️ {blocker}"
+
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            "UPDATE users SET balance = balance - ? WHERE id = ? AND balance >= ?",
+            (price, uid, price),
         )
-    
-    elif item == "clover":
-        cursor.execute("UPDATE users SET balance = balance - ?, rig_prob = rig_prob + 5 WHERE id = ?", 
-                      (price, user_id))
-        success_text = "✅ Куплен <b>Клевер</b>! Ваша удача +5% 🍀"
-    
-    elif item == "vip":
-        cursor.execute("UPDATE users SET balance = balance - ?, rigged_mode = 'vip' WHERE id = ?", 
-                      (price, user_id))
-        success_text = "✅ Вы получили <b>VIP Статус</b>! 👑 Теперь вы выглядите круче."
-    
-    elif item == "no_limit":
-        cursor.execute("UPDATE users SET balance = balance - ?, luck_end = 777 WHERE id = ?", 
-                      (price, user_id))
-        success_text = "✅ Активирован <b>Безлимит</b>! Ставьте сколько хотите."
-    
-    elif item == "mine_shield":
-        cursor.execute("UPDATE users SET balance = balance - ?, mine_shield = COALESCE(mine_shield, 0) + 1 WHERE id = ?", 
-                      (price, user_id))
-        success_text = "✅ Куплен <b>Саперный щит</b>! Он защитит вас при взрыве на мине."
-        
-    elif item == "mine_scan":
-        cursor.execute("UPDATE users SET balance = balance - ?, mine_scan = COALESCE(mine_scan, 0) + 3 WHERE id = ?", 
-                      (price, user_id))
-        success_text = "✅ Куплено 3 <b>Сканера мин</b>! Используйте их в игре Mines для просмотра мин."
+        if cursor.rowcount == 0:
+            cursor.execute("ROLLBACK")
+            return False, f"❌ Недостаточно средств. Нужно {price:,} 💎."
 
-    elif item == "dice_reroll":
-        cursor.execute("UPDATE users SET balance = balance - ?, rerolls = COALESCE(rerolls, 0) + 1 WHERE id = ?", 
-                      (price, user_id))
-        success_text = "✅ Куплен <b>Переброс кубика</b>! Один раз перекидайте результат игры."
+        if item == "boost_x2":
+            boost_until = int(time.time()) + 24 * 3600
+            cursor.execute("UPDATE users SET boost_end = ? WHERE id = ?", (boost_until, uid))
+            msg = "🔥 Буст x2 активирован на 24 часа."
+        elif item == "clover":
+            cursor.execute("UPDATE users SET rig_prob = MIN(rig_prob + 5, 95) WHERE id = ?", (uid,))
+            msg = "🍀 Клевер применён. Удача +5% (макс 95%)."
+        elif item == "vip":
+            cursor.execute("UPDATE users SET rigged_mode = 'vip' WHERE id = ?", (uid,))
+            msg = "💎 Тебе выдан VIP-статус."
+        elif item == "no_limit":
+            cursor.execute("UPDATE users SET luck_end = 777 WHERE id = ?", (uid,))
+            msg = "📈 Безлимит ставок активирован."
+        elif item == "mine_shield":
+            cursor.execute("UPDATE users SET mine_shield = COALESCE(mine_shield, 0) + 1 WHERE id = ?", (uid,))
+            msg = "🛡 Саперный щит добавлен в инвентарь."
+        elif item == "mine_scan":
+            cursor.execute("UPDATE users SET mine_scan = COALESCE(mine_scan, 0) + 3 WHERE id = ?", (uid,))
+            msg = "🔍 В инвентарь добавлено 3 сканера мин."
+        elif item == "dice_reroll":
+            cursor.execute("UPDATE users SET rerolls = COALESCE(rerolls, 0) + 1 WHERE id = ?", (uid,))
+            msg = "🔄 Переброс кубика добавлен."
+        elif item == "bet_insure":
+            cursor.execute("UPDATE users SET bet_insure = COALESCE(bet_insure, 0) + 1 WHERE id = ?", (uid,))
+            msg = "🃏 Страховка ставки добавлена."
+        elif item == "safe_box":
+            cursor.execute(
+                "UPDATE users SET safe_box_level = COALESCE(safe_box_level, 0) + 1 WHERE id = ?",
+                (uid,),
+            )
+            msg = "🏦 Уровень сейфа повышен."
+        elif item == "gold_ticket":
+            cursor.execute("UPDATE users SET gold_ticket = COALESCE(gold_ticket, 0) + 1 WHERE id = ?", (uid,))
+            msg = "🎟 Золотой билет добавлен."
+        elif item == "energy_drink":
+            cursor.execute("UPDATE users SET energy_drink = COALESCE(energy_drink, 0) + 1 WHERE id = ?", (uid,))
+            msg = "⚡️ Энергетик добавлен."
+        elif item == "incognito":
+            cursor.execute("UPDATE users SET incognito_mode = 1 WHERE id = ?", (uid,))
+            msg = "🕵️ Режим невидимки включён."
+        else:
+            cursor.execute("ROLLBACK")
+            return False, "❌ Неизвестный предмет."
 
-    elif item == "bet_insure":
-        cursor.execute("UPDATE users SET balance = balance - ?, bet_insure = COALESCE(bet_insure, 0) + 1 WHERE id = ?", 
-                      (price, user_id))
-        success_text = "✅ Куплена <b>Страховка ставки</b>! При проигрыше вернется 50%."
+        conn.commit()
+        return True, f"✅ {msg}"
+    except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("shop: ошибка покупки %s", item)
+        return False, "❌ Ошибка при покупке, попробуй ещё раз."
 
-    elif item == "safe_box":
-        cursor.execute("UPDATE users SET balance = balance - ?, safe_box_level = COALESCE(safe_box_level, 0) + 1 WHERE id = ?", 
-                      (price, user_id))
-        success_text = "✅ Куплен <b>Сейф</b>! Защитите часть своего баланса от обнуления."
 
-    elif item == "gold_ticket":
-        cursor.execute("UPDATE users SET balance = balance - ?, gold_ticket = COALESCE(gold_ticket, 0) + 1 WHERE id = ?", 
-                      (price, user_id))
-        success_text = "✅ Куплен <b>Золотой билет</b>! Шанс выиграть джекпот x3 в лотерее."
+@router.callback_query(F.data.startswith("confirm_buy:"))
+async def buy_confirm(call: types.CallbackQuery):
+    await call.answer()
+    item = call.data.split(":", 1)[1]
+    if item not in SHOP_CATALOG:
+        return await call.answer("❌ Неизвестный предмет.", show_alert=True)
 
-    elif item == "energy_drink":
-        cursor.execute("UPDATE users SET balance = balance - ?, energy_drink = COALESCE(energy_drink, 0) + 1 WHERE id = ?", 
-                      (price, user_id))
-        success_text = "✅ Куплен <b>Энергетик</b>! Используйте для сброса КД на ежедневный бонус."
+    ok, msg = _apply_purchase(item, call.from_user.id)
 
-    elif item == "incognito":
-        cursor.execute("UPDATE users SET balance = balance - ?, incognito_mode = 1 WHERE id = ?", 
-                      (price, user_id))
-        success_text = "✅ Активирован <b>Режим невидимки</b>! Вы скрыты в топе богачей 🕵️"
+    u = db_get_user(call.from_user.id)
+    balance_line = f"\n💳 Баланс: {u[0]:,} 💎" if u else ""
 
-    conn.commit()
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ В магазин", callback_data="shop:back")
+    kb.adjust(1)
 
-    back_kb = InlineKeyboardBuilder()
-    back_kb.button(text="⬅️ В магазин", callback_data="shop:back")
-
-    await call.message.edit_text(
-        success_text, reply_markup=back_kb.as_markup(), parse_mode="HTML"
-    )
-    await call.answer("✅ Спасибо за покупку!")
+    try:
+        await call.message.edit_text(
+            msg + balance_line, reply_markup=kb.as_markup(), parse_mode="HTML"
+        )
+    except Exception:
+        await call.message.answer(msg + balance_line, reply_markup=kb.as_markup(), parse_mode="HTML")
 
 
 @router.message(Command("bonus"))
 async def get_bonus(message: types.Message):
     user_id = message.from_user.id
     now = int(time.time())
-    
-    cursor.execute("SELECT last_bonus, energy_drink FROM users WHERE id = ?", (user_id,))
-    u = cursor.fetchone()
-    last_bonus, drinks = u[0], u[1]
-    
-    if now - last_bonus < 86400:
-        kb = InlineKeyboardBuilder()
-        if drinks > 0:
-            kb.button(text=f"⚡️ Выпить энергетик ({drinks} шт.)", callback_data="use:energy")
-        
-        remains = (86400 - (now - last_bonus)) // 3600
-        return await message.answer(f"⏳ Бонус будет доступен через {remains} ч.", 
-                                    reply_markup=kb.as_markup())
-
     reward = 5000
-    cursor.execute(
-        "UPDATE users SET balance = balance + ?, last_bonus = ? WHERE id = ?",
-        (reward, now, user_id),
-    )
-    conn.commit()
+    cooldown = 86400
+
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            "UPDATE users SET balance = balance + ?, last_bonus = ? "
+            "WHERE id = ? AND (? - COALESCE(last_bonus, 0)) >= ?",
+            (reward, now, user_id, now, cooldown),
+        )
+        if cursor.rowcount == 0:
+            cursor.execute("ROLLBACK")
+            cursor.execute(
+                "SELECT last_bonus, energy_drink FROM users WHERE id = ?", (user_id,)
+            )
+            row = cursor.fetchone() or (0, 0)
+            last_bonus, drinks = row[0] or 0, row[1] or 0
+            kb = InlineKeyboardBuilder()
+            if drinks > 0:
+                kb.button(text=f"⚡️ Выпить энергетик ({drinks})", callback_data="use:energy")
+            remains = max(0, cooldown - (now - last_bonus)) // 3600
+            return await message.answer(
+                f"⏳ Бонус будет доступен через {remains} ч.",
+                reply_markup=kb.as_markup(),
+            )
+        conn.commit()
+    except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("bonus: failed")
+        return await message.answer("❌ Ошибка, попробуй ещё раз.")
+
     await message.answer(
-        f"🎁 Вы получили ежедневный бонус: <b>{reward:,}</b> 💸"
+        f"🎁 Ежедневный бонус зачислен: <b>{reward:,}</b> 💎",
+        parse_mode="HTML",
     )
+
 
 @router.callback_query(F.data == "use:energy")
 async def use_energy_logic(call: types.CallbackQuery):
     user_id = call.from_user.id
-    cursor.execute("SELECT energy_drink FROM users WHERE id = ?", (user_id,))
-    drinks = cursor.fetchone()[0]
-    
-    if drinks <= 0:
-        return await call.answer("❌ Энергетики закончились!", show_alert=True)
-
-    cursor.execute(
-        "UPDATE users SET energy_drink = energy_drink - 1, last_bonus = 0 WHERE id = ?",
-        (user_id,),
-    )
-    conn.commit()
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            "UPDATE users SET energy_drink = energy_drink - 1, last_bonus = 0 "
+            "WHERE id = ? AND COALESCE(energy_drink, 0) > 0",
+            (user_id,),
+        )
+        if cursor.rowcount == 0:
+            cursor.execute("ROLLBACK")
+            return await call.answer("❌ Энергетики закончились!", show_alert=True)
+        conn.commit()
+    except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("use:energy failed")
+        return await call.answer("Ошибка.", show_alert=True)
 
     await call.message.edit_text(
         "⚡️ Вы выпили энергетик! Теперь введите /bonus, чтобы получить бонус."
@@ -339,31 +427,37 @@ async def use_energy_logic(call: types.CallbackQuery):
 @router.message(Command("newid"))
 async def change_custom_id(message: types.Message):
     user_data = await check_user(message)
-    if not user_data: return
-    
-    if user_data[0] < 100000:
-        return await message.reply("❌ Недостаточно средств (100,000 💎).")
-    
+    if not user_data:
+        return
+
     args = message.text.split()
     if len(args) < 2:
         return await message.reply("📝 Напишите имя: `/newid [Слово]`")
-    
+
     new_name = args[1][:30]
     if new_name.isdigit():
         return await message.reply("❌ Имя не может состоять только из цифр.")
 
-    cursor.execute("SELECT id FROM users WHERE custom_id = ?", (new_name,))
-    if cursor.fetchone():
-        return await message.reply("❌ Этот ID уже занят!")
-
+    price = 100_000
     try:
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute("SELECT id FROM users WHERE custom_id = ?", (new_name,))
+        if cursor.fetchone():
+            cursor.execute("ROLLBACK")
+            return await message.reply("❌ Этот ID уже занят!")
         cursor.execute(
-            "UPDATE users SET custom_id = ?, balance = balance - 100000 WHERE id = ?",
-            (new_name, message.from_user.id),
+            "UPDATE users SET custom_id = ?, balance = balance - ? "
+            "WHERE id = ? AND balance >= ?",
+            (new_name, price, message.from_user.id, price),
         )
+        if cursor.rowcount == 0:
+            cursor.execute("ROLLBACK")
+            return await message.reply(f"❌ Недостаточно средств ({price:,} 💎).")
         conn.commit()
-        await message.reply(f"✅ Успех! Твой новый публичный ID: `{new_name}`")
+        await message.reply(f"✅ Твой новый публичный ID: `{new_name}`")
     except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("newid: failed")
         await message.reply("❌ Ошибка при обновлении базы.")
 
 
