@@ -240,6 +240,13 @@ def apply_migrations() -> None:
         ("users", "last_wheel", "INTEGER DEFAULT 0"),
         ("users", "scratch_pack", "INTEGER DEFAULT 0"),
         ("users", "rig_force", "TEXT DEFAULT 'off'"),
+        ("users", "role", "TEXT DEFAULT 'player'"),
+        ("users", "cosmetic_tag", "TEXT DEFAULT ''"),
+        ("users", "wheel_token", "INTEGER DEFAULT 0"),
+        ("users", "auto_collect_end", "INTEGER DEFAULT 0"),
+        ("users", "boost_mult", "INTEGER DEFAULT 2"),
+        ("users", "starter_pack_used", "INTEGER DEFAULT 0"),
+        ("users", "lotto_pack", "INTEGER DEFAULT 0"),
     ]
 
     for table, column, definition in migrations:
@@ -348,20 +355,23 @@ def db_update_stats(user_id: int, bet: int = 0, win: int = 0, deducted: bool = F
     has_cashback = user_data[11] if len(user_data) > 11 else 0
     bet_insure = user_data[12] if len(user_data) > 12 else 0
 
-    # Привилегия (может отсутствовать у старых пользователей — ленивый запрос)
     try:
-        cursor.execute("SELECT privilege FROM users WHERE id = ?", (user_id,))
+        cursor.execute(
+            "SELECT COALESCE(privilege, 'none'), COALESCE(boost_mult, 2) FROM users WHERE id = ?",
+            (user_id,),
+        )
         priv_row = cursor.fetchone()
         privilege = (priv_row[0] if priv_row else "none") or "none"
+        boost_mult = int(priv_row[1]) if priv_row and priv_row[1] else 2
     except Exception:
         privilege = "none"
+        boost_mult = 2
 
     final_win = win
 
-    # Буст x2
     try:
         if isinstance(boost_end, (int, float)) and boost_end > time.time():
-            final_win = int(win * 2)
+            final_win = int(win * max(2, boost_mult))
     except (TypeError, ValueError):
         pass
 
@@ -445,6 +455,52 @@ def db_set_rig(user_id: int, mode: str) -> bool:
     except Exception:
         logger.exception("db_set_rig")
         return False
+
+
+ROLE_LABELS = {
+    "owner":  "👑 OWNER",
+    "admin":  "🛡 ADMIN",
+    "helper": "🎧 HELPER",
+    "player": "",
+}
+
+
+def db_get_role(user_id: int) -> str:
+    """Возвращает роль: owner/admin/helper/player. Owner автоматически из ENV ADMIN_ID."""
+    import os as _os
+    owner_id = int(_os.getenv("ADMIN_ID", "5030561581"))
+    if user_id == owner_id:
+        return "owner"
+    try:
+        cursor.execute("SELECT role FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            return "player"
+        val = (row[0] or "player").strip().lower()
+        return val if val in ("admin", "helper") else "player"
+    except Exception:
+        return "player"
+
+
+def db_set_role(user_id: int, role: str) -> bool:
+    role = (role or "player").strip().lower()
+    if role not in ("player", "helper", "admin"):
+        return False
+    try:
+        cursor.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception:
+        logger.exception("db_set_role")
+        return False
+
+
+def is_admin_or_higher(user_id: int) -> bool:
+    return db_get_role(user_id) in ("owner", "admin")
+
+
+def is_helper_or_higher(user_id: int) -> bool:
+    return db_get_role(user_id) in ("owner", "admin", "helper")
 
 
 def db_get_global_stats() -> Tuple[int, Optional[int]]:

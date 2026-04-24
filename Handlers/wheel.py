@@ -68,10 +68,12 @@ def wheel_menu_text(free_available: bool, seconds_left: int, privilege: str = "n
     )
 
 
-def wheel_menu_kb(free_available: bool) -> InlineKeyboardBuilder:
+def wheel_menu_kb(free_available: bool, tokens: int = 0) -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
     if free_available:
         kb.button(text="🎁 Крутить бесплатно", callback_data="wheel:spin:free")
+    if tokens > 0:
+        kb.button(text=f"🎡 Жетон ({tokens})", callback_data="wheel:spin:token")
     kb.button(text=f"💸 Крутить за {EXTRA_SPIN_PRICE:,}", callback_data="wheel:spin:paid")
     kb.adjust(1)
     return kb
@@ -84,11 +86,12 @@ async def wheel_entry(message: types.Message):
         return await message.reply("🚫 Вы заблокированы.")
 
     cursor.execute(
-        "SELECT COALESCE(last_wheel, 0), COALESCE(privilege, 'none') FROM users WHERE id = ?",
+        "SELECT COALESCE(last_wheel, 0), COALESCE(privilege, 'none'), COALESCE(wheel_token, 0) "
+        "FROM users WHERE id = ?",
         (message.from_user.id,),
     )
-    row = cursor.fetchone() or (0, "none")
-    last, privilege = row[0], row[1]
+    row = cursor.fetchone() or (0, "none", 0)
+    last, privilege, tokens = row[0], row[1], row[2]
     cd = _wheel_cooldown(privilege)
     now = int(time.time())
     free_available = now - last >= cd
@@ -96,7 +99,7 @@ async def wheel_entry(message: types.Message):
 
     await message.answer(
         wheel_menu_text(free_available, seconds_left, privilege),
-        reply_markup=wheel_menu_kb(free_available).as_markup(),
+        reply_markup=wheel_menu_kb(free_available, tokens).as_markup(),
         parse_mode="HTML",
     )
 
@@ -126,6 +129,15 @@ async def wheel_spin(call: types.CallbackQuery):
                 cursor.execute("ROLLBACK")
                 return await call.message.answer("❌ Бесплатный спин пока недоступен.")
             cursor.execute("UPDATE users SET last_wheel = ? WHERE id = ?", (now, user_id))
+        elif kind == "token":
+            cursor.execute(
+                "UPDATE users SET wheel_token = wheel_token - 1 "
+                "WHERE id = ? AND COALESCE(wheel_token, 0) > 0",
+                (user_id,),
+            )
+            if cursor.rowcount == 0:
+                cursor.execute("ROLLBACK")
+                return await call.message.answer("❌ Жетонов нет.")
         elif kind == "paid":
             if balance < EXTRA_SPIN_PRICE:
                 cursor.execute("ROLLBACK")

@@ -81,8 +81,10 @@ async def run_crash_game(message: Message, state: FSMContext):
         'user_id': user_id,
         'bet': bet,
         'multiplier': multiplier,
+        'crash_point': crash_point,
         'crashed': False,
-        'message_id': None
+        'cashed_out': False,
+        'message_id': None,
     }
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -113,11 +115,11 @@ async def run_crash_game(message: Message, state: FSMContext):
                     logger.warning(f"Timeout в CRASH: {e}")
 
             if multiplier >= crash_point:
+                active_games[game_id]['crashed'] = True
                 break
 
-        if not active_games[game_id]['crashed']:
-            if multiplier >= crash_point:
-                # Краш произошел
+        if not active_games[game_id].get('cashed_out'):
+            if active_games[game_id]['crashed']:
                 try:
                     await msg.edit_text(f"💥 <b>CRASH! Множитель: {multiplier:.2f}x</b>", reply_markup=None, parse_mode="HTML")
                 except TelegramBadRequest as e:
@@ -150,21 +152,21 @@ async def cashout_handler(callback: CallbackQuery):
             return await callback.answer("🚫 Игра уже завершена или не найдена.", show_alert=True)
 
         crash_point = active_games[game_id].get('crash_point', 999999)
-        
+
         if active_games[game_id]['user_id'] != user_id:
             return await callback.answer("🚫 Это не ваша игра!", show_alert=True)
-        
+
+        if active_games[game_id].get('cashed_out'):
+            return await callback.answer("🚫 Выигрыш уже был забран.", show_alert=True)
         if active_games[game_id]['crashed']:
             return await callback.answer("🚫 Игра уже завершена.", show_alert=True)
-        
-        # Дополнительная проверка: не крашнулось ли уже
         if active_games[game_id]['multiplier'] >= crash_point:
-             return await callback.answer("⏰ Слишком поздно! Краш уже произошел.", show_alert=True)
+            return await callback.answer("⏰ Слишком поздно! Краш уже произошел.", show_alert=True)
 
-        active_games[game_id]['crashed'] = True
+        active_games[game_id]['cashed_out'] = True
         bet = active_games[game_id]['bet']
         multiplier = active_games[game_id]['multiplier']
-        
+
         win_amount = int(bet * multiplier)
         db_update_stats(user_id, 0, win_amount)
         
