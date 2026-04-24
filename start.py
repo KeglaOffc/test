@@ -1,12 +1,9 @@
 """Точка входа Telegram казино-бота."""
 import asyncio
 import atexit
-import datetime
 import logging
 import os
-import random
 import sys
-import time
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
@@ -49,9 +46,6 @@ logger = logging.getLogger(__name__)
 from database import (  # noqa: E402
     apply_migrations,
     clear_daily_stats,
-    conn,
-    cursor,
-    db_update_stats,
     init_tables,
 )
 from Handlers import (  # noqa: E402
@@ -73,7 +67,6 @@ from Handlers import (  # noqa: E402
 from Handlers.logging_middleware import LoggingMiddleware  # noqa: E402
 from Handlers.maintenance import MaintenanceMiddleware  # noqa: E402
 from Handlers.throttling import flood_middleware  # noqa: E402
-from utils import safe_send_message  # noqa: E402
 
 try:
     init_tables()
@@ -108,131 +101,7 @@ ROUTERS = [
 ]
 
 
-async def hourly_draw_task(bot: Bot) -> None:
-    """Фоновая задача часовой лотереи.
-
-    Последовательность:
-        1. За 5 минут до часа — уведомление участникам.
-        2. За 1 минуту — финальный отсчёт.
-        3. Ровно на начало часа — розыгрыш.
-    """
-    logger.info("Часовая лотерея запущена")
-
-    while True:
-        try:
-            now = datetime.datetime.now()
-            next_hour = (now + datetime.timedelta(hours=1)).replace(
-                minute=0, second=0, microsecond=0
-            )
-
-            warning_time = next_hour - datetime.timedelta(minutes=5)
-            wait_for_warning = (warning_time - datetime.datetime.now()).total_seconds()
-            if wait_for_warning > 0:
-                await asyncio.sleep(wait_for_warning)
-                await notify_lottery_participants(
-                    bot,
-                    "⏰ **До розыгрыша Часовой лотереи осталось 5 минут!**\n"
-                    "Успей купить ещё билеты, чтобы повысить шансы.",
-                )
-
-            final_call_time = next_hour - datetime.timedelta(minutes=1)
-            wait_for_final = (final_call_time - datetime.datetime.now()).total_seconds()
-            if wait_for_final > 0:
-                await asyncio.sleep(wait_for_final)
-                try:
-                    await notify_lottery_participants(
-                        bot,
-                        "🔔 **ВНИМАНИЕ!** Розыгрыш начнётся через 60 секунд! 🤞",
-                    )
-                except Exception as e:
-                    logger.warning("Не удалось отправить уведомление: %s", e)
-
-            wait_for_draw = (next_hour - datetime.datetime.now()).total_seconds()
-            if wait_for_draw > 0:
-                await asyncio.sleep(wait_for_draw)
-
-            await process_hourly_draw(bot)
-
-        except Exception as e:
-            logger.error("Ошибка в часовой лотерее: %s", e, exc_info=True)
-            await asyncio.sleep(60)
-
-
-async def notify_lottery_participants(bot: Bot, message_text: str) -> None:
-    """Рассылает сообщение всем участникам текущего тиража часовой лотереи."""
-    try:
-        cursor.execute(
-            "SELECT DISTINCT user_id FROM lottery_tickets "
-            "WHERE lottery_type = 'hourly' AND buy_time > ?",
-            (int(time.time()) - 3600,),
-        )
-        participants = [r[0] for r in cursor.fetchall()]
-        for uid in participants:
-            ok = await safe_send_message(
-                bot, uid, message_text, parse_mode="Markdown", max_retries=2
-            )
-            if not ok:
-                logger.warning("Не удалось уведомить пользователя %s", uid)
-    except Exception as e:
-        logger.error("Ошибка при рассылке уведомлений: %s", e)
-
-
-async def process_hourly_draw(bot: Bot) -> None:
-    """Проводит розыгрыш часовой лотереи."""
-    try:
-        cursor.execute(
-            "SELECT draw_id, prize_pool FROM hourly_state ORDER BY draw_id DESC LIMIT 1"
-        )
-        res = cursor.fetchone()
-        if not res:
-            logger.warning("Информация о тираже не найдена")
-            return
-
-        draw_id, prize = res
-
-        cursor.execute(
-            "SELECT user_id, COUNT(*) AS tix FROM lottery_tickets "
-            "WHERE lottery_type = 'hourly' AND buy_time > ? "
-            "GROUP BY user_id ORDER BY tix DESC",
-            (int(time.time()) - 3600,),
-        )
-        rows = cursor.fetchall()
-
-        if not rows:
-            cursor.execute("INSERT INTO hourly_state (prize_pool) VALUES (?)", (prize,))
-            conn.commit()
-            logger.info("Тираж #%s пуст. Приз %s перенесён", draw_id, prize)
-            return
-
-        pool_for_random = []
-        for uid, tix in rows:
-            pool_for_random.extend([uid] * tix)
-        winner_id = random.choice(pool_for_random)
-
-        db_update_stats(winner_id, bet=0, win=prize)
-
-        lines = [f"🎰 **ИТОГИ РОЗЫГРЫША #{draw_id}**", "", "👤 **Участники и билеты:**"]
-        for i, (uid, tix) in enumerate(rows, 1):
-            mark = "🏆" if uid == winner_id else "🔹"
-            lines.append(f"{i}. {mark} ID: `{uid}` — {tix} шт.")
-        lines.append("")
-        lines.append(f"💰 **Общий приз:** `{prize:,}` 💎")
-        lines.append(f"👑 **Победитель:** `{winner_id}`")
-        result_text = "\n".join(lines)
-
-        for uid, _ in rows:
-            ok = await safe_send_message(
-                bot, uid, result_text, parse_mode="Markdown", max_retries=2
-            )
-            if not ok:
-                logger.warning("Не удалось отправить результат пользователю %s", uid)
-
-        cursor.execute("INSERT INTO hourly_state (prize_pool) VALUES (100000)")
-        conn.commit()
-        logger.info("Розыгрыш #%s завершён. Победитель: %s", draw_id, winner_id)
-
-    except Exception as e:
-        logger.error("Ошибка при проведении розыгрыша: %s", e, exc_info=True)
+from Handlers.lottery import hourly_loop, weekly_loop  # noqa: E402
 
 
 async def main() -> None:
@@ -280,8 +149,9 @@ async def main() -> None:
 
     logger.info("Бот готов к работе")
 
-    asyncio.create_task(hourly_draw_task(bot))
-    logger.info("Фоновая задача часовой лотереи запущена")
+    asyncio.create_task(hourly_loop(bot))
+    asyncio.create_task(weekly_loop(bot))
+    logger.info("Фоновые задачи лотерей запущены")
 
     try:
         await dp.start_polling(bot)

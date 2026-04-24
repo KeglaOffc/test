@@ -1,6 +1,27 @@
+"""Онлайн-режим 1×1: дуэли между реальными игроками.
+
+Раньше модуль назывался «PvP», сейчас вся видимая часть переименована в «Онлайн».
+Команда /pvp оставлена как алиас для совместимости.
+
+Доступные режимы:
+- 🎲 Кости, 🎯 Дартс, 🏀 Баскетбол, ⚽ Футбол — бросают Telegram-дайс, больше = победа.
+- 🎡 Рулетка — оба крутят барабан (0–36), больше = победа.
+- 🪙 Монетка — орёл/решка, каждый выбирает сторону.
+
+Экономика:
+- Создатель делает ставку → сумма списывается сразу.
+- Второй игрок платит ту же ставку при присоединении (либо играет бесплатно,
+  если заработал это через 50 побед).
+- При обычной победе победитель получает банк минус 5% комиссии.
+- При ничьей ставки возвращаются обоим.
+- Бесплатный вход: банк = ставка создателя; победа «бесплатника» — 50% банка,
+  вторая половина возвращается создателю.
+"""
 import asyncio
 import logging
+import random
 import time
+from typing import Optional
 
 from aiogram import F, Router, types
 from aiogram.filters import Command
@@ -14,605 +35,478 @@ from database import (
     db_get_user,
     db_has_free_games,
     db_increment_pvp_wins,
-    db_update_stats,
 )
 from utils import safe_send_message
 
 logger = logging.getLogger(__name__)
 router = Router()
 
-class PvPState(StatesGroup):
+
+MIN_BET = 100
+MAX_BET = 5_000_000
+COMMISSION = 0.05
+
+
+MODES = {
+    "dice":       {"label": "🎲 Кости",      "emoji": "🎲"},
+    "darts":      {"label": "🎯 Дартс",      "emoji": "🎯"},
+    "basketball": {"label": "🏀 Баскетбол",  "emoji": "🏀"},
+    "football":   {"label": "⚽ Футбол",     "emoji": "⚽"},
+    "roulette":   {"label": "🎡 Рулетка",    "emoji": "🎡"},
+    "coin":       {"label": "🪙 Монетка",    "emoji": "🪙"},
+}
+
+
+class OnlineState(StatesGroup):
     waiting_bet = State()
-    selecting_mode = State()
 
-@router.message(Command("pvp"))
-async def pvp_menu(message: types.Message):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🎲 Кости (Dice)", callback_data="pvp_mode:dice")
-    builder.button(text="🎯 Дартс (Darts)", callback_data="pvp_mode:darts") 
-    builder.button(text="🏀 Баскетбол (Basketball)", callback_data="pvp_mode:basketball")
-    builder.button(text="⚽ Футбол (Football)", callback_data="pvp_mode:football")
-    builder.button(text="🔍 Найти соперника", callback_data="pvp_list")
-    builder.button(text="📋 Мои игры", callback_data="pvp_my")
-    builder.adjust(2, 2, 1, 1)
-    
-    user_data = db_get_user(message.from_user.id)
-    pvp_wins = user_data[13] if len(user_data) > 14 else 0  # Индекс pvp_wins в обновленной схеме
-    has_free_games = db_has_free_games(message.from_user.id)
-    
-    status_text = ""
-    if has_free_games:
-        status_text = "🏆 **ВИП СТАТУС:** Все игры бесплатны!\n"
-    elif pvp_wins >= 50:
-        status_text = f"🏆 **ПОБЕД:** {pvp_wins}/50 - Доступ к бесплатным играм активирован!\n"
-    else:
-        status_text = f"📊 **Прогресс:** {pvp_wins}/50 побед до бесплатных игр\n"
-    
-    text = (
-        f"⚔️ **PVP АРЕНА (1x1)**\n\n"
-        f"{status_text}\n"
-        f"Выберите режим игры:\n"
-        f"🎲 **Кости** - Классическая игра в кости\n"
-        f"🎯 **Дартс** - Стрельба по мишени\n"
-        f"🏀 **Баскетбол** - Броски в кольцо\n"
-        f"⚽ **Футбол** - Удары по воротам\n\n"
-        f"🆓 **Бесплатный вход:** Можно сыграть без ставки, но выигрыш составит только 50% от банка.\n"
-        f"⚠️ Комиссия арены: 5% с выигрыша."
-    )
-    await message.answer(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
-@router.callback_query(F.data == "pvp_menu")
-async def back_to_pvp(call: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await pvp_menu(call.message)
-    await call.answer()
+def _deduct(user_id: int, amount: int) -> bool:
+    """Атомарное списание ставки с профиля игрока."""
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            "UPDATE users SET balance = balance - ? WHERE id = ? AND balance >= ?",
+            (amount, user_id, amount),
+        )
+        ok = cursor.rowcount > 0
+        conn.commit()
+        return ok
+    except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("online:_deduct")
+        return False
 
-@router.callback_query(F.data.startswith("pvp_mode:"))
-async def pvp_select_mode(call: types.CallbackQuery, state: FSMContext):
-    game_mode = call.data.split(":")[1]
-    await state.update_data(game_mode=game_mode)
-    
-    mode_names = {
-        'dice': '🎲 Кости',
-        'darts': '🎯 Дартс', 
-        'basketball': '🏀 Баскетбол',
-        'football': '⚽ Футбол'
-    }
-    
-    await call.message.edit_text(
-        f"💸 **СОЗДАНИЕ ДУЭЛИ - {mode_names[game_mode]}**\n\nВведите сумму ставки (минимум 100 💎):",
-        reply_markup=InlineKeyboardBuilder().button(text="🔙 Отмена", callback_data="pvp_menu").as_markup(),
-        parse_mode="Markdown"
-    )
-    await state.set_state(PvPState.waiting_bet)
 
-@router.callback_query(F.data == "pvp_create")
-async def pvp_create_start(call: types.CallbackQuery, state: FSMContext):
-    await call.message.edit_text(
-        "💸 **СОЗДАНИЕ ДУЭЛИ**\n\nВведите сумму ставки (минимум 100 💎):",
-        reply_markup=InlineKeyboardBuilder().button(text="🔙 Отмена", callback_data="pvp_menu").as_markup(),
-        parse_mode="Markdown"
-    )
-    await state.set_state(PvPState.waiting_bet)
-
-@router.message(PvPState.waiting_bet)
-async def pvp_create_process(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        return await message.reply("❌ Введите число!")
-    
-    bet = int(message.text)
-    if bet <= 0:
-        return await message.reply("❌ Ставка должна быть положительной!")
-    if bet < 100:
-        return await message.reply("❌ Минимальная ставка — 100 💎")
-    
-    user_data = db_get_user(message.from_user.id)
-    
-    # Проверяем, имеет ли пользователь бесплатные игры
-    has_free_games = db_has_free_games(message.from_user.id)
-    
-    if not has_free_games and user_data[0] < bet:
-        return await message.reply(f"❌ Недостаточно средств! Баланс: {user_data[0]:,} 💎")
-    
-    # Получаем режим игры из состояния
-    data = await state.get_data()
-    game_mode = data.get('game_mode', 'dice')
-    
-    # Списываем ставку только если у пользователя нет бесплатных игр
-    has_free_games = db_has_free_games(message.from_user.id)
-    if not has_free_games:
-        db_update_stats(message.from_user.id, bet=bet, win=0)
-    
-    # Создаем игру
-    now = int(time.time())
+def _credit(user_id: int, amount: int) -> None:
+    if amount <= 0:
+        return
     cursor.execute(
-        "INSERT INTO pvp_games (creator_id, bet, created_at, join_type, game_mode) VALUES (?, ?, ?, 'paid', ?)",
-        (message.from_user.id, bet, now, game_mode)
+        "UPDATE users SET balance = balance + ? WHERE id = ?",
+        (amount, user_id),
+    )
+    conn.commit()
+
+
+def _menu_text(user_id: int) -> str:
+    user_data = db_get_user(user_id)
+    wins = user_data[13] if len(user_data) > 13 else 0
+    has_free = db_has_free_games(user_id)
+    if has_free:
+        status = "🏆 VIP: все игры бесплатны"
+    else:
+        status = f"🏅 Побед: {wins}/50 до бесплатного входа"
+    return (
+        "🌐 <b>Онлайн — 1×1 дуэли</b>\n\n"
+        f"{status}\n\n"
+        "Выбирай режим игры, создавай заявку или присоединяйся к существующей.\n"
+        "Комиссия арены: 5% с выигрыша."
+    )
+
+
+def _menu_kb() -> types.InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎲 Кости",     callback_data="on:mode:dice")
+    kb.button(text="🎯 Дартс",     callback_data="on:mode:darts")
+    kb.button(text="🏀 Баскет",    callback_data="on:mode:basketball")
+    kb.button(text="⚽ Футбол",    callback_data="on:mode:football")
+    kb.button(text="🎡 Рулетка",   callback_data="on:mode:roulette")
+    kb.button(text="🪙 Монетка",   callback_data="on:mode:coin")
+    kb.button(text="🔍 Найти соперника", callback_data="on:list")
+    kb.button(text="📋 Мои заявки",      callback_data="on:my")
+    kb.adjust(2, 2, 2, 1, 1)
+    return kb.as_markup()
+
+
+@router.message(Command("online", "pvp"))
+async def online_menu(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(_menu_text(message.from_user.id), reply_markup=_menu_kb(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "on:menu")
+async def on_menu_cb(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.answer()
+    try:
+        await call.message.edit_text(_menu_text(call.from_user.id), reply_markup=_menu_kb(), parse_mode="HTML")
+    except Exception:
+        await call.message.answer(_menu_text(call.from_user.id), reply_markup=_menu_kb(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("on:mode:"))
+async def on_pick_mode(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+    mode = call.data.split(":")[2]
+    if mode not in MODES:
+        return
+    await state.update_data(game_mode=mode)
+    await state.set_state(OnlineState.waiting_bet)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="on:menu")
+    try:
+        await call.message.edit_text(
+            f"💸 <b>Дуэль — {MODES[mode]['label']}</b>\n\n"
+            f"Введи сумму ставки (мин. {MIN_BET:,} 💎, макс. {MAX_BET:,} 💎).",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+@router.message(OnlineState.waiting_bet)
+async def on_create(message: types.Message, state: FSMContext):
+    if not (message.text or "").isdigit():
+        return await message.reply("❌ Нужно число.")
+    bet = int(message.text)
+    if bet < MIN_BET:
+        return await message.reply(f"❌ Минимальная ставка — {MIN_BET:,} 💎.")
+    if bet > MAX_BET:
+        return await message.reply(f"❌ Максимальная ставка — {MAX_BET:,} 💎.")
+
+    user_id = message.from_user.id
+    has_free = db_has_free_games(user_id)
+
+    if not has_free:
+        if not _deduct(user_id, bet):
+            balance = db_get_user(user_id)[0]
+            return await message.reply(f"❌ Недостаточно средств. Баланс: {balance:,} 💎")
+
+    data = await state.get_data()
+    mode = data.get("game_mode", "dice")
+    join_type = "free" if has_free else "paid"
+
+    cursor.execute(
+        "INSERT INTO pvp_games (creator_id, bet, created_at, join_type, game_mode, status) "
+        "VALUES (?, ?, ?, ?, ?, 'waiting')",
+        (user_id, bet, int(time.time()), join_type, mode),
     )
     conn.commit()
     game_id = cursor.lastrowid
-    
     await state.clear()
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="❌ Отменить поиск", callback_data=f"pvp_cancel:{game_id}")
-    builder.button(text="🔙 В меню", callback_data="pvp_menu")
-    builder.adjust(1)
-    
-    mode_names = {
-        'dice': '🎲 Кости',
-        'darts': '🎯 Дартс', 
-        'basketball': '🏀 Баскетбол',
-        'football': '⚽ Футбол'
-    }
-    
-    # Определяем тип игры
-    game_type_text = "🆓 БЕСПЛАТНАЯ" if has_free_games else "💰 ПЛАТНАЯ"
-    
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="❌ Отменить заявку", callback_data=f"on:cancel:{game_id}")
+    kb.button(text="⬅️ В меню", callback_data="on:menu")
+    kb.adjust(1)
     await message.answer(
-        f"✅ **ДУЭЛЬ #{game_id} СОЗДАНА!**\n\n"
-        f"🎮 Режим: {mode_names[game_mode]}\n"
-        f"💰 Ставка: {bet:,} 💎\n"
-        f"🎮 Тип игры: {game_type_text}\n"
-        f"⏳ Ожидаем соперника...\n\n"
-        f"Ваша игра появилась в общем списке.",
-        reply_markup=builder.as_markup(),
-        parse_mode="Markdown"
+        f"✅ <b>Заявка #{game_id} создана</b>\n\n"
+        f"Режим: {MODES[mode]['label']}\n"
+        f"Ставка: <b>{bet:,}</b> 💎 "
+        f"({'🏆 VIP' if has_free else '💰 Платная'})\n"
+        f"⏳ Ждём соперника…",
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML",
     )
 
-@router.callback_query(F.data.startswith("pvp_list"))
-async def pvp_list_games(call: types.CallbackQuery):
-    # Проверяем, есть ли фильтр по режиму
-    mode_filter = None
-    if call.data.startswith("pvp_list:"):
-        mode_filter = call.data.split(":")[1]
-    
+
+@router.callback_query(F.data.startswith("on:list"))
+async def on_list(call: types.CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":")
+    mode_filter: Optional[str] = parts[2] if len(parts) >= 3 else None
+
     if mode_filter:
         cursor.execute(
-            "SELECT id, creator_id, bet, game_mode FROM pvp_games WHERE status = 'waiting' AND game_mode = ? ORDER BY bet DESC LIMIT 10",
-            (mode_filter,)
+            "SELECT id, creator_id, bet, game_mode FROM pvp_games "
+            "WHERE status = 'waiting' AND game_mode = ? ORDER BY bet DESC LIMIT 10",
+            (mode_filter,),
         )
     else:
         cursor.execute(
-            "SELECT id, creator_id, bet, game_mode FROM pvp_games WHERE status = 'waiting' ORDER BY bet DESC LIMIT 10"
+            "SELECT id, creator_id, bet, game_mode FROM pvp_games "
+            "WHERE status = 'waiting' ORDER BY bet DESC LIMIT 10"
         )
     games = cursor.fetchall()
-    
-    if not games:
-        builder = InlineKeyboardBuilder()
-        builder.button(text="⚔️ Создать свою", callback_data="pvp_menu")
-        builder.button(text="🔙 Назад", callback_data="pvp_menu")
-        builder.adjust(1)
-        return await call.message.edit_text(
-            "🔍 **АКТИВНЫХ ИГР НЕТ**\n\nНикто еще не создал дуэль в этом режиме. Будьте первым!",
-            reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
-        )
-    
-    builder = InlineKeyboardBuilder()
-    
-    # Кнопки фильтрации по режиму
-    builder.button(text="🎲 Кости", callback_data="pvp_list:dice")
-    builder.button(text="🎯 Дартс", callback_data="pvp_list:darts")
-    builder.button(text="🏀 Баскет", callback_data="pvp_list:basketball")
-    builder.button(text="⚽ Футбол", callback_data="pvp_list:football")
-    
-    for game in games:
-        game_id, creator_id, bet, game_mode = game
-        mode_icons = {
-            'dice': '🎲',
-            'darts': '🎯',
-            'basketball': '🏀',
-            'football': '⚽'
-        }
-        icon = mode_icons.get(game_mode, '🎮')
-        
-        # Не показываем кнопку "Играть" самому себе
-        if creator_id == call.from_user.id:
-            builder.button(text=f"🗑 #{game_id} {icon}({bet:,})", callback_data=f"pvp_cancel:{game_id}")
-        else:
-            # Две кнопки: Платная и Бесплатная
-            builder.button(text=f"⚔️ {icon} {bet:,} 💎", callback_data=f"pvp_join:{game_id}")
-            builder.button(text=f"🆓 {icon} Бесплатно", callback_data=f"pvp_join_free:{game_id}")
-    
-    builder.button(text="🔄 Обновить", callback_data="pvp_list")
-    builder.button(text="🔙 Назад", callback_data="pvp_menu")
-    
-    # Adjust: сначала фильтры (4 кнопки), затем игры (по 2 на строку)
-    builder.adjust(4)  # Фильтры в одну строку
-    # Игры - по 2 кнопки на строку (платная + бесплатная для одной игры)
-    remaining_buttons = len([g for g in games if g[1] != call.from_user.id]) * 2 + len([g for g in games if g[1] == call.from_user.id])
-    if remaining_buttons > 0:
-        builder.adjust(4, *[2 for _ in range((remaining_buttons + 1) // 2)])  # Фильтры + игры
-    
-    filter_text = f" (режим: {mode_filter})" if mode_filter else ""
-    
-    await call.message.edit_text(
-        f"🔍 **СПИСОК ДУЭЛЕЙ{filter_text}**\n\nВыберите соперника:\n"
-        f"⚔️ - Играть на ставку (Полный выигрыш)\n"
-        f"🆓 - Играть бесплатно (50% выигрыша)",
-        reply_markup=builder.as_markup(),
-        parse_mode="Markdown"
-    )
 
-@router.callback_query(F.data.startswith("pvp_cancel:"))
-async def pvp_cancel(call: types.CallbackQuery):
-    game_id = int(call.data.split(":")[1])
+    kb = InlineKeyboardBuilder()
+    for key, meta in MODES.items():
+        kb.button(text=meta["emoji"], callback_data=f"on:list:{key}")
+
+    if not games:
+        kb.button(text="⬅️ В меню", callback_data="on:menu")
+        kb.adjust(len(MODES), 1)
+        try:
+            return await call.message.edit_text(
+                "🔍 <b>Заявок нет</b>\nСтань первым, кто создаст дуэль.",
+                reply_markup=kb.as_markup(),
+                parse_mode="HTML",
+            )
+        except Exception:
+            return
+
+    for gid, cr_id, bet, mode in games:
+        meta = MODES.get(mode, {"emoji": "🎮"})
+        if cr_id == call.from_user.id:
+            kb.button(text=f"🗑 #{gid} {meta['emoji']} {bet:,}", callback_data=f"on:cancel:{gid}")
+        else:
+            kb.button(text=f"⚔️ {meta['emoji']} {bet:,}", callback_data=f"on:join:{gid}")
+            kb.button(text=f"🆓 {meta['emoji']}",          callback_data=f"on:join_free:{gid}")
+
+    kb.button(text="🔄 Обновить", callback_data="on:list")
+    kb.button(text="⬅️ В меню",   callback_data="on:menu")
+
+    layout = [len(MODES)]
+    mine = [g for g in games if g[1] == call.from_user.id]
+    others = [g for g in games if g[1] != call.from_user.id]
+    layout += [1] * len(mine)
+    layout += [2] * len(others)
+    layout += [2]
+    kb.adjust(*layout)
+
+    try:
+        await call.message.edit_text(
+            "🔍 <b>Заявки</b>\n⚔️ — платная (полный приз)\n🆓 — бесплатная (50% приза)\n"
+            + (f"Фильтр: <code>{mode_filter}</code>\n" if mode_filter else ""),
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("on:cancel:"))
+async def on_cancel(call: types.CallbackQuery):
+    game_id = int(call.data.split(":")[2])
     user_id = call.from_user.id
-    
-    cursor.execute("SELECT creator_id, bet, status FROM pvp_games WHERE id = ?", (game_id,))
-    game = cursor.fetchone()
-    
-    if not game:
-        return await call.answer("❌ Игра не найдена", show_alert=True)
-    
-    if game[0] != user_id:
-        return await call.answer("❌ Это не ваша игра!", show_alert=True)
-        
-    if game[2] != 'waiting':
-        return await call.answer("❌ Игра уже началась или завершена!", show_alert=True)
-    
-    # Возврат средств
-    bet = game[1]
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (bet, user_id))
+    cursor.execute("SELECT creator_id, bet, status, join_type FROM pvp_games WHERE id = ?", (game_id,))
+    row = cursor.fetchone()
+    if not row:
+        return await call.answer("❌ Заявка не найдена.", show_alert=True)
+    cr_id, bet, status, join_type = row
+    if cr_id != user_id:
+        return await call.answer("❌ Это не твоя заявка.", show_alert=True)
+    if status != "waiting":
+        return await call.answer("❌ Игра уже началась.", show_alert=True)
+
+    if join_type == "paid":
+        _credit(user_id, bet)
     cursor.execute("DELETE FROM pvp_games WHERE id = ?", (game_id,))
     conn.commit()
-    
-    await call.answer("✅ Игра отменена, деньги возвращены.")
-    await pvp_list_games(call)
+    await call.answer("✅ Заявка отменена, ставка возвращена.")
+    await on_list(call)
 
-@router.callback_query(F.data.startswith("pvp_join"))
-async def pvp_join(call: types.CallbackQuery):
-    is_free = "free" in call.data
-    game_id = int(call.data.split(":")[1])
+
+@router.callback_query(F.data.startswith("on:my"))
+async def on_my(call: types.CallbackQuery):
+    await call.answer()
+    uid = call.from_user.id
+    cursor.execute(
+        "SELECT id, bet, game_mode FROM pvp_games WHERE creator_id = ? AND status = 'waiting' ORDER BY id DESC",
+        (uid,),
+    )
+    rows = cursor.fetchall()
+    kb = InlineKeyboardBuilder()
+    if not rows:
+        text = "📋 У тебя нет активных заявок."
+    else:
+        text = "📋 <b>Активные заявки</b>\n\n"
+        for gid, bet, mode in rows:
+            meta = MODES.get(mode, {"emoji": "🎮"})
+            text += f"• #{gid} {meta['emoji']} — {bet:,} 💎\n"
+            kb.button(text=f"🗑 Отменить #{gid}", callback_data=f"on:cancel:{gid}")
+    kb.button(text="⬅️ В меню", callback_data="on:menu")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("on:join"))
+async def on_join(call: types.CallbackQuery):
+    is_free_request = "free" in call.data
+    game_id = int(call.data.split(":")[-1])
     joiner_id = call.from_user.id
-    
-    cursor.execute("SELECT creator_id, bet, status, game_mode FROM pvp_games WHERE id = ?", (game_id,))
-    game = cursor.fetchone()
-    
-    if not game:
-        return await call.answer("❌ Игра уже не существует", show_alert=True)
-        
-    creator_id, bet, status, game_mode = game
-    
-    if status != 'waiting':
-        return await call.answer("❌ Игра уже идет или завершена", show_alert=True)
-        
-    if creator_id == joiner_id:
-        return await call.answer("❌ Нельзя играть с самим собой!", show_alert=True)
-    
-    # Если платный вход - проверяем баланс и списываем
-    if not is_free:
-        # Проверяем, имеет ли пользователь бесплатные игры
-        if db_has_free_games(joiner_id):
-            is_free = True  # Пользователь с 50+ победами играет бесплатно
-        else:
-            joiner_data = db_get_user(joiner_id)
-            if joiner_data[0] < bet:
-                return await call.answer(f"❌ Недостаточно средств! Нужно {bet:,} 💎", show_alert=True)
-            db_update_stats(joiner_id, bet=bet, win=0)
-    
-    join_type = 'free' if is_free else 'paid'
-    
-    # Обновление статуса игры с проверкой race condition
-    cursor.execute("UPDATE pvp_games SET joiner_id = ?, status = 'active', join_type = ? WHERE id = ? AND status = 'waiting'", 
-                   (joiner_id, join_type, game_id))
-    
+
+    cursor.execute(
+        "SELECT creator_id, bet, status, game_mode, join_type FROM pvp_games WHERE id = ?",
+        (game_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return await call.answer("❌ Заявка не найдена.", show_alert=True)
+    cr_id, bet, status, mode, creator_join = row
+    if status != "waiting":
+        return await call.answer("❌ Уже идёт или завершена.", show_alert=True)
+    if cr_id == joiner_id:
+        return await call.answer("❌ Нельзя против себя.", show_alert=True)
+
+    joiner_has_free = db_has_free_games(joiner_id)
+    joiner_is_free = is_free_request or joiner_has_free
+
+    deducted = False
+    if not joiner_is_free:
+        if not _deduct(joiner_id, bet):
+            balance = db_get_user(joiner_id)[0]
+            return await call.answer(f"❌ Нужно {bet:,} 💎. Баланс: {balance:,}", show_alert=True)
+        deducted = True
+
+    cursor.execute(
+        "UPDATE pvp_games SET joiner_id = ?, status = 'active', join_type = ? "
+        "WHERE id = ? AND status = 'waiting'",
+        (joiner_id, "free" if joiner_is_free else "paid", game_id),
+    )
     if cursor.rowcount == 0:
-        # Если не удалось обновить (кто-то успел раньше), возвращаем деньги
-        if not is_free:
-            db_update_stats(joiner_id, bet=0, win=bet)
+        if deducted:
+            _credit(joiner_id, bet)
         conn.commit()
-        return await call.answer("❌ Кто-то уже присоединился к этой игре!", show_alert=True)
-        
+        return await call.answer("❌ Другой игрок успел раньше.", show_alert=True)
     conn.commit()
-    
-    pot_display = bet if is_free else bet * 2
-    
-    # Получаем название режима
-    mode_names = {
-        'dice': '🎲 Кости',
-        'darts': '🎯 Дартс', 
-        'basketball': '🏀 Баскетбол',
-        'football': '⚽ Футбол'
-    }
-    mode_name = mode_names.get(game_mode, '🎮 Игра')
-    
-    # Проверяем, имеет ли присоединившийся игрок бесплатные игры
-    joiner_has_free_games = db_has_free_games(joiner_id)
-    if joiner_has_free_games:
-        is_free = True
-        join_type = 'free'
-    
+
+    await call.answer()
     await call.message.edit_text(
-        f"⚔️ **ДУЭЛЬ #{game_id} НАЧАЛАСЬ!**\n\n"
-        f"🎮 Режим: {mode_name}\n"
-        f"👤 **Игрок 1** (Создатель): `{creator_id}`\n"
-        f"👤 **Игрок 2** (Соперник): `{joiner_id}` ({'🏆 ВИП Бесплатно' if joiner_has_free_games else '🆓 Бесплатно' if is_free else '💰 Платно'})\n"
-        f"💰 Банк раунда: {pot_display:,} 💎\n\n"
-        f"🎲 **ПОРЯДОК ХОДА:**\n"
-        f"1️⃣ Игрок 1 делает попытку первым\n"
-        f"2️⃣ Игрок 2 делает попытку вторым\n\n"
-        f"🎯 Победит тот, у кого лучший результат!",
-        parse_mode="Markdown"
+        f"⚔️ <b>Дуэль #{game_id}</b>\n"
+        f"Режим: {MODES[mode]['label']}\n"
+        f"Создатель: <code>{cr_id}</code>\n"
+        f"Соперник:  <code>{joiner_id}</code> "
+        f"({'🆓 бесплатно' if joiner_is_free else '💰 платно'})\n"
+        f"Банк: <b>{(bet if joiner_is_free else bet * 2):,}</b> 💎",
+        parse_mode="HTML",
     )
-    
-    if game_mode == 'dice':
-        await play_dice_game(call, creator_id, joiner_id, bet, is_free, game_id)
-    elif game_mode == 'darts':
-        await play_darts_game(call, creator_id, joiner_id, bet, is_free, game_id)
-    elif game_mode == 'basketball':
-        await play_basketball_game(call, creator_id, joiner_id, bet, is_free, game_id)
-    elif game_mode == 'football':
-        await play_football_game(call, creator_id, joiner_id, bet, is_free, game_id)
 
-
-async def play_dice_game(call, creator_id, joiner_id, bet, is_free, game_id):
-    """Игра в кости - классическая игра"""
-    await asyncio.sleep(2)
-    await call.message.answer(
-        f"🎲 **ХОД ИГРОКА 1** (Создатель)...\n"
-        f"👤 Игрок: {creator_id}\n"
-        f"💰 Ставка: {bet:,} 💎\n"
-        f"🎯 Бросаем кубик!",
-        parse_mode="Markdown"
-    )
-    await asyncio.sleep(1.5)
-    
-    dice1_msg = await call.message.answer_dice(emoji="🎲")
-    val1 = dice1_msg.dice.value
-    await asyncio.sleep(3)
-    
-    await call.message.answer(
-        f"🎲 **ХОД ИГРОКА 2** (Соперник)...\n"
-        f"👤 Игрок: {joiner_id}\n"
-        f"{'🆓 Бесплатный вход' if is_free else '💰 Платный вход'}\n"
-        f"🎯 Бросаем кубик!",
-        parse_mode="Markdown"
-    )
-    await asyncio.sleep(1.5)
-    
-    dice2_msg = await call.message.answer_dice(emoji="🎲")
-    val2 = dice2_msg.dice.value
-    await asyncio.sleep(3)
-    
-    # Определение победителя
-    await determine_winner(call, creator_id, joiner_id, val1, val2, bet, is_free, game_id, "🎲 Кости")
-
-async def play_darts_game(call, creator_id, joiner_id, bet, is_free, game_id):
-    """Игра в дартс - стрельба по мишени"""
-    await asyncio.sleep(2)
-    await call.message.answer(
-        f"🎯 **ХОД ИГРОКА 1** (Создатель)...\n"
-        f"👤 Игрок: {creator_id}\n"
-        f"💰 Ставка: {bet:,} 💎\n"
-        f"🎯 Стреляем в мишень!",
-        parse_mode="Markdown"
-    )
-    await asyncio.sleep(1.5)
-    
-    darts1_msg = await call.message.answer_dice(emoji="🎯")
-    val1 = darts1_msg.dice.value
-    await asyncio.sleep(3)
-    
-    await call.message.answer(
-        f"🎯 **ХОД ИГРОКА 2** (Соперник)...\n"
-        f"👤 Игрок: {joiner_id}\n"
-        f"{'🆓 Бесплатный вход' if is_free else '💰 Платный вход'}\n"
-        f"🎯 Стреляем в мишень!",
-        parse_mode="Markdown"
-    )
-    await asyncio.sleep(1.5)
-    
-    darts2_msg = await call.message.answer_dice(emoji="🎯")
-    val2 = darts2_msg.dice.value
-    await asyncio.sleep(3)
-    
-    # Определение победителя
-    await determine_winner(call, creator_id, joiner_id, val1, val2, bet, is_free, game_id, "🎯 Дартс")
-
-async def play_basketball_game(call, creator_id, joiner_id, bet, is_free, game_id):
-    """Игра в баскетбол - броски в кольцо"""
-    await asyncio.sleep(2)
-    await call.message.answer(
-        f"🏀 **ХОД ИГРОКА 1** (Создатель)...\n"
-        f"👤 Игрок: {creator_id}\n"
-        f"💰 Ставка: {bet:,} 💎\n"
-        f"🏀 Бросаем мяч в кольцо!",
-        parse_mode="Markdown"
-    )
-    await asyncio.sleep(1.5)
-    
-    basketball1_msg = await call.message.answer_dice(emoji="🏀")
-    val1 = basketball1_msg.dice.value
-    await asyncio.sleep(3)
-    
-    await call.message.answer(
-        f"🏀 **ХОД ИГРОКА 2** (Соперник)...\n"
-        f"👤 Игрок: {joiner_id}\n"
-        f"{'🆓 Бесплатный вход' if is_free else '💰 Платный вход'}\n"
-        f"🏀 Бросаем мяч в кольцо!",
-        parse_mode="Markdown"
-    )
-    await asyncio.sleep(1.5)
-    
-    basketball2_msg = await call.message.answer_dice(emoji="🏀")
-    val2 = basketball2_msg.dice.value
-    await asyncio.sleep(3)
-    
-    # Определение победителя
-    await determine_winner(call, creator_id, joiner_id, val1, val2, bet, is_free, game_id, "🏀 Баскетбол")
-
-async def play_football_game(call, creator_id, joiner_id, bet, is_free, game_id):
-    """Игра в футбол - удары по воротам"""
-    await asyncio.sleep(2)
-    await call.message.answer(
-        f"⚽ **ХОД ИГРОКА 1** (Создатель)...\n"
-        f"👤 Игрок: {creator_id}\n"
-        f"💰 Ставка: {bet:,} 💎\n"
-        f"⚽ Бьем по воротам!",
-        parse_mode="Markdown"
-    )
-    await asyncio.sleep(1.5)
-    
-    football1_msg = await call.message.answer_dice(emoji="⚽")
-    val1 = football1_msg.dice.value
-    await asyncio.sleep(3)
-    
-    await call.message.answer(
-        f"⚽ **ХОД ИГРОКА 2** (Соперник)...\n"
-        f"👤 Игрок: {joiner_id}\n"
-        f"{'🆓 Бесплатный вход' if is_free else '💰 Платный вход'}\n"
-        f"⚽ Бьем по воротам!",
-        parse_mode="Markdown"
-    )
-    await asyncio.sleep(1.5)
-    
-    football2_msg = await call.message.answer_dice(emoji="⚽")
-    val2 = football2_msg.dice.value
-    await asyncio.sleep(3)
-    
-    # Определение победителя
-    await determine_winner(call, creator_id, joiner_id, val1, val2, bet, is_free, game_id, "⚽ Футбол")
-
-async def determine_winner(call, creator_id, joiner_id, val1, val2, bet, is_free, game_id, game_name):
-    """Универсальная функция определения победителя"""
-    winner_id = None
-    result_text = ""
-    
-    # Логика банка
-    # Если платный: Банк = bet * 2. Победитель получает (bet*2)*0.95.
-    # Если бесплатный: Банк = bet. 
-    #   Если выигрывает Создатель: Получает bet (возврат).
-    #   Если выигрывает Бесплатный: Получает bet * 0.5. Создатель получает bet * 0.5 (возврат половины).
-    
-    if val1 > val2:
-        winner_id = creator_id
-        result_text = f"🏆 Победил Игрок 1 (`{creator_id}`)!\n\n"
-        
-        if is_free:
-            # Создатель победил бесплатника -> просто возврат ставки
-            win_amount = bet
-            db_update_stats(creator_id, bet=0, win=win_amount)
-            result_text += f"💰 Возврат ставки: {win_amount:,} 💎"
+    player_free_flag = joiner_is_free and creator_join != "free"
+    try:
+        if mode == "coin":
+            await play_coin(call, cr_id, joiner_id, bet, player_free_flag, game_id)
+        elif mode == "roulette":
+            await play_roulette(call, cr_id, joiner_id, bet, player_free_flag, game_id)
         else:
-            # Обычная победа
-            total_pot = bet * 2
-            commission = int(total_pot * 0.05)
-            win_amount = total_pot - commission
-            db_update_stats(creator_id, bet=0, win=win_amount)
-            result_text += f"💰 Выигрыш: {win_amount:,} 💎 (Комиссия {commission:,})"
+            await play_dice_mode(call, cr_id, joiner_id, bet, player_free_flag, game_id, mode)
+    except Exception:
+        logger.exception("online: play error mode=%s", mode)
 
+
+async def _spin_dice(bot, chat_id: int, emoji: str) -> int:
+    msg = await bot.send_dice(chat_id, emoji=emoji)
+    await asyncio.sleep(3)
+    return msg.dice.value
+
+
+async def play_dice_mode(call, cr_id, joiner_id, bet, is_free, game_id, mode):
+    meta = MODES[mode]
+    bot = call.message.bot
+    chat_id = call.message.chat.id
+
+    await call.message.answer(f"{meta['emoji']} Ход создателя…", parse_mode="HTML")
+    await asyncio.sleep(1)
+    val1 = await _spin_dice(bot, chat_id, meta["emoji"])
+
+    await call.message.answer(f"{meta['emoji']} Ход соперника…", parse_mode="HTML")
+    await asyncio.sleep(1)
+    val2 = await _spin_dice(bot, chat_id, meta["emoji"])
+
+    await finish_duel(call, cr_id, joiner_id, val1, val2, bet, is_free, game_id, meta["label"])
+
+
+async def play_roulette(call, cr_id, joiner_id, bet, is_free, game_id):
+    bot = call.message.bot
+    chat_id = call.message.chat.id
+
+    await call.message.answer("🎡 Крутим барабан для создателя…", parse_mode="HTML")
+    await asyncio.sleep(1.5)
+    v1 = random.randint(0, 36)
+    await bot.send_message(chat_id, f"🎡 Выпало у создателя: <b>{v1}</b>", parse_mode="HTML")
+    await asyncio.sleep(1)
+
+    await call.message.answer("🎡 Крутим барабан для соперника…", parse_mode="HTML")
+    await asyncio.sleep(1.5)
+    v2 = random.randint(0, 36)
+    await bot.send_message(chat_id, f"🎡 Выпало у соперника: <b>{v2}</b>", parse_mode="HTML")
+    await asyncio.sleep(1)
+
+    await finish_duel(call, cr_id, joiner_id, v1, v2, bet, is_free, game_id, "🎡 Рулетка")
+
+
+async def play_coin(call, cr_id, joiner_id, bet, is_free, game_id):
+    bot = call.message.bot
+    chat_id = call.message.chat.id
+
+    v1 = random.randint(0, 1)
+    v2 = 1 - v1
+    label = {0: "Орёл 🦅", 1: "Решка 🪙"}
+    await call.message.answer("🪙 Подбрасываем монетку…", parse_mode="HTML")
+    await asyncio.sleep(1.5)
+
+    target = random.randint(0, 1)
+    await bot.send_message(
+        chat_id,
+        f"🪙 Выпало: <b>{label[target]}</b>\n"
+        f"Создатель ставил: {label[v1]}\n"
+        f"Соперник ставил:  {label[v2]}",
+        parse_mode="HTML",
+    )
+    if v1 == target:
+        await finish_duel(call, cr_id, joiner_id, 1, 0, bet, is_free, game_id, "🪙 Монетка")
+    else:
+        await finish_duel(call, cr_id, joiner_id, 0, 1, bet, is_free, game_id, "🪙 Монетка")
+
+
+async def finish_duel(call, cr_id, joiner_id, val1, val2, bet, is_free, game_id, label):
+    winner_id: Optional[int] = None
+    lines = []
+
+    if val1 > val2:
+        winner_id = cr_id
+        if is_free:
+            win_amount = bet
+            _credit(cr_id, win_amount)
+            lines.append(f"🏆 Победил создатель. Возврат ставки: {win_amount:,} 💎")
+        else:
+            pot = bet * 2
+            win_amount = pot - int(pot * COMMISSION)
+            _credit(cr_id, win_amount)
+            lines.append(f"🏆 Победил создатель. Выигрыш: {win_amount:,} 💎 (комиссия {int(pot * COMMISSION):,})")
     elif val2 > val1:
         winner_id = joiner_id
-        result_text = f"🏆 Победил Игрок 2 (`{joiner_id}`)!\n\n"
-        
         if is_free:
-            # Бесплатник победил -> получает 50% от ставки создателя
             win_amount = int(bet * 0.5)
-            creator_refund = int(bet * 0.5)
-            
-            db_update_stats(joiner_id, bet=0, win=win_amount)
-            db_update_stats(creator_id, bet=0, win=creator_refund) # Возврат половины создателю
-            
-            result_text += f"💰 Выигрыш (50%): {win_amount:,} 💎\n(Создателю возвращено {creator_refund:,} 💎)"
+            refund = bet - win_amount
+            _credit(joiner_id, win_amount)
+            _credit(cr_id, refund)
+            lines.append(f"🏆 Победил соперник. Приз: {win_amount:,} 💎 (создателю вернули {refund:,} 💎)")
         else:
-            # Обычная победа
-            total_pot = bet * 2
-            commission = int(total_pot * 0.05)
-            win_amount = total_pot - commission
-            db_update_stats(joiner_id, bet=0, win=win_amount)
-            result_text += f"💰 Выигрыш: {win_amount:,} 💎 (Комиссия {commission:,})"
-            
+            pot = bet * 2
+            win_amount = pot - int(pot * COMMISSION)
+            _credit(joiner_id, win_amount)
+            lines.append(f"🏆 Победил соперник. Выигрыш: {win_amount:,} 💎 (комиссия {int(pot * COMMISSION):,})")
     else:
-        # Ничья
-        result_text = f"🤝 **НИЧЬЯ!** ({val1} vs {val2})\n\n💰 Ставки возвращены."
-        
-        # Возврат создателю
-        cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (bet, creator_id))
-        # Возврат джойнеру (если платил)
+        _credit(cr_id, bet)
         if not is_free:
-            cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (bet, joiner_id))
-        conn.commit()
+            _credit(joiner_id, bet)
+        lines.append(f"🤝 Ничья ({val1} : {val2}). Ставки возвращены.")
 
-    # Запись результата
-    cursor.execute("UPDATE pvp_games SET status = 'finished', winner_id = ? WHERE id = ?", (winner_id, game_id))
-    
-    # Увеличиваем счетчик PVP побед для победителя
-    if winner_id:
-        new_pvp_wins = db_increment_pvp_wins(winner_id)
-        
-        # Проверяем достижение 50 побед
-        if new_pvp_wins == 50:
-            # Отправляем поздравление победителю
-            try:
-                congrats_text = (
-                    "🎉 **Ура!** 🎉\n\n"
-                    "Вы достигли **50 ПОБЕД** в PVP арене!\n\n"
-                    "🏆 **Ваша награда:** Бесплатный доступ ко всем играм!\n"
-                    "Теперь вы можете играть в любые игры без ставок!\n\n"
-                    "Спасибо за участие в нашем казино!"
-                )
-                await safe_send_message(call.message.bot, winner_id, congrats_text, parse_mode="Markdown")
-            except Exception as e:
-                logger.warning(f"Failed to send congratulations to {winner_id}: {e}")
-    
-    conn.commit()
-    
-    # Иконки для результатов
-    icons = {
-        "🎲 Кости": "🎲",
-        "🎯 Дартс": "🎯",
-        "🏀 Баскетбол": "🏀",
-        "⚽ Футбол": "⚽"
-    }
-    icon = icons.get(game_name, "🎲")
-    
-    try:
-        await call.message.answer(
-            f"{result_text}\n"
-            f"{icon} **Результаты:**\n"
-            f"Игрок 1: {val1}\n"
-            f"Игрок 2: {val2}\n"
-            f"{'🏆 Победил Игрок 1!' if val1 > val2 else '🏆 Победил Игрок 2!' if val2 > val1 else '🤝 Ничья!'}\n"
-            f"Разница: {abs(val1 - val2) if val1 != val2 else 0}",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.warning(f"Failed to send game results: {e}")
-    
-    # Уведомления в ЛС
-    msg = f"⚔️ **Дуэль #{game_id} ({game_name}) завершена!**\nСчет: {val1}:{val2}\n"
-    if winner_id == creator_id: msg += "🏆 Вы победили!"
-    elif winner_id == joiner_id: msg += "💀 Вы проиграли."
-    else: msg += "🤝 Ничья."
-    await safe_send_message(call.message.bot, creator_id, msg, parse_mode="Markdown")
-    
-    if joiner_id != call.from_user.id:
-        await safe_send_message(call.message.bot, joiner_id, msg, parse_mode="Markdown")
-
-@router.callback_query(F.data == "pvp_my")
-async def pvp_my_games(call: types.CallbackQuery):
-    user_id = call.from_user.id
     cursor.execute(
-        "SELECT id, bet, status FROM pvp_games WHERE creator_id = ? AND status = 'waiting' ORDER BY id DESC",
-        (user_id,)
+        "UPDATE pvp_games SET status = 'finished', winner_id = ? WHERE id = ?",
+        (winner_id, game_id),
     )
-    games = cursor.fetchall()
-    
-    if not games:
-        return await call.answer("❌ У вас нет активных заявок", show_alert=True)
-    
-    builder = InlineKeyboardBuilder()
-    for game in games:
-        game_id, bet, status = game
-        builder.button(text=f"🗑 Отменить #{game_id} ({bet:,})", callback_data=f"pvp_cancel:{game_id}")
-    
-    builder.button(text="🔙 Назад", callback_data="pvp_menu")
-    builder.adjust(1)
-    
-    await call.message.edit_text(
-        "📋 **ВАШИ АКТИВНЫЕ ЗАЯВКИ**",
-        reply_markup=builder.as_markup(),
-        parse_mode="Markdown"
-    )
+    conn.commit()
+
+    if winner_id:
+        new_wins = db_increment_pvp_wins(winner_id)
+        if new_wins == 50:
+            try:
+                await safe_send_message(
+                    call.message.bot,
+                    winner_id,
+                    "🎉 Ты достиг 50 побед в онлайн-режиме!\n"
+                    "Теперь все онлайн-игры для тебя бесплатные.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+    header = f"⚔️ <b>Дуэль #{game_id} — {label}</b>\nСчёт: {val1} : {val2}"
+    try:
+        await call.message.answer("\n".join([header] + lines), parse_mode="HTML")
+    except Exception:
+        pass
+
+    msg = f"{header}\n" + "\n".join(lines)
+    for uid in {cr_id, joiner_id}:
+        try:
+            await safe_send_message(call.message.bot, uid, msg, parse_mode="HTML")
+        except Exception:
+            pass

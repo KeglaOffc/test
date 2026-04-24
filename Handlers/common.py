@@ -1,4 +1,5 @@
 import logging
+import random
 import time
 
 from aiogram import F, Router, types
@@ -46,8 +47,8 @@ async def cmd_help(message: types.Message):
         "• `/lottery` — Лотерейный центр\n"
         "• `/scratch` — Мгновенная лотерея\n\n"
 
-        "⚔️ **DUELS & SPORT (PVP):**\n"
-        "• `/pvp` — Меню дуэлей с игроками\n"
+        "🌐 **ОНЛАЙН-ДУЭЛИ 1×1:**\n"
+        "• `/online` — Дуэли с другими игроками (все режимы)\n"
         "• `/dice [сумма]` — Кости против бота\n"
         "• `/darts [сумма]` — Дартс против бота\n"
         "• `/football [сумма]` — Серия пенальти\n"
@@ -127,7 +128,7 @@ async def cmd_start(message: types.Message):
         f"• Лимит: `{limit_text}`\n"
         f"• Статус: `{incognito_status}`\n"
         f"• Сейф: `{safe_info}`\n"
-        f"• PVP: `{pvp_status}`\n\n"
+        f"• Онлайн: `{pvp_status}`\n\n"
         
         f"🎒 **ИНВЕНТАРЬ:**\n"
         f"{inv_str}\n"
@@ -138,19 +139,41 @@ async def cmd_start(message: types.Message):
     await safe_reply_message(message, text, parse_mode="Markdown")
 
 SHOP_CATALOG = {
-    "boost_x2":     {"price": 100_000,   "title": "🔥 X2 Буст 24ч",       "desc": "Все выигрыши удваиваются на 24 часа."},
-    "clover":       {"price": 500_000,   "title": "🍀 Клевер удачи",       "desc": "+5% к базовому шансу выигрыша (стакается)."},
-    "vip":          {"price": 1_000_000, "title": "💎 VIP-статус",          "desc": "Пожизненный VIP-бейдж. Один раз."},
-    "no_limit":     {"price": 500_000,   "title": "📈 Безлимит ставок",    "desc": "Снимает потолок ставки в 1 млн."},
-    "mine_shield":  {"price": 50_000,    "title": "🛡 Саперный щит",       "desc": "Спасает один взрыв в /mines. До 10 шт."},
-    "mine_scan":    {"price": 80_000,    "title": "🔍 Сканер мин",         "desc": "Подсвечивает одну мину в /mines. Пачка из 3. До 15 шт."},
-    "dice_reroll":  {"price": 40_000,    "title": "🔄 Переброс кубика",    "desc": "Перекинуть результат в /dice и /darts. До 10 шт."},
-    "bet_insure":   {"price": 150_000,   "title": "🃏 Страховка ставки",   "desc": "При проигрыше возвращает 50% ставки. До 10 шт."},
-    "safe_box":     {"price": 400_000,   "title": "🏦 Сейф (уровень +1)",  "desc": "Защищает 20% баланса за уровень. До 5 уровней."},
-    "gold_ticket":  {"price": 120_000,   "title": "🎟 Золотой билет",      "desc": "Утраивает джекпот, если выпал в лотерее. До 5 шт."},
-    "energy_drink": {"price": 60_000,    "title": "⚡️ Энергетик",          "desc": "Сбрасывает КД на /bonus. До 10 шт."},
-    "incognito":    {"price": 180_000,   "title": "🕵️ Режим невидимки",    "desc": "Прячет тебя в /top. Включается один раз."},
+    # Бусты и удача
+    "boost_x2":     {"cat": "boosts", "price": 100_000,   "title": "🔥 X2 Буст 24ч",       "desc": "Все выигрыши удваиваются на 24 часа."},
+    "clover":       {"cat": "boosts", "price": 500_000,   "title": "🍀 Клевер удачи",       "desc": "+5% к базовому шансу выигрыша (стакается, максимум 95%)."},
+    "no_limit":     {"cat": "boosts", "price": 500_000,   "title": "📈 Безлимит ставок",    "desc": "Снимает потолок ставки в 1 млн. Один раз."},
+
+    # Инвентарь
+    "mine_shield":  {"cat": "inv", "price": 50_000,   "title": "🛡 Саперный щит",       "desc": "Спасает один взрыв в /mines. До 10 шт."},
+    "mine_scan":    {"cat": "inv", "price": 80_000,   "title": "🔍 Сканер мин",         "desc": "Подсвечивает одну мину в /mines. Пачка из 3. До 15 шт."},
+    "dice_reroll":  {"cat": "inv", "price": 40_000,   "title": "🔄 Переброс кубика",    "desc": "Перекинуть результат в /dice и /darts. До 10 шт."},
+    "bet_insure":   {"cat": "inv", "price": 150_000,  "title": "🃏 Страховка ставки",   "desc": "При проигрыше возвращает 50% ставки. До 10 шт."},
+    "safe_box":     {"cat": "inv", "price": 400_000,  "title": "🏦 Сейф (уровень +1)",  "desc": "Защищает 20% баланса за уровень. До 5 уровней."},
+    "gold_ticket":  {"cat": "inv", "price": 120_000,  "title": "🎟 Золотой билет",      "desc": "Утраивает джекпот, если выпал в лотерее. До 5 шт."},
+    "energy_drink": {"cat": "inv", "price": 60_000,   "title": "⚡️ Энергетик",          "desc": "Сбрасывает КД на /bonus. До 10 шт."},
+
+    # Привилегии
+    "vip_bronze":   {"cat": "priv", "price": 500_000,    "title": "🥉 VIP-BRONZE",   "desc": "Бейдж + +2% к кэшбэку на всех играх."},
+    "vip_silver":   {"cat": "priv", "price": 2_500_000,  "title": "🥈 VIP-SILVER",   "desc": "Бейдж + +5% кэшбэк, повышает предел ежедневного бонуса."},
+    "vip_gold":     {"cat": "priv", "price": 10_000_000, "title": "🥇 VIP-GOLD",     "desc": "Бейдж + +10% кэшбэк, ежедневный бонус x2, особый ник."},
+    "vip":          {"cat": "priv", "price": 1_000_000,  "title": "💎 VIP-классик",   "desc": "Старый пожизненный VIP-бейдж без процентов."},
+    "incognito":    {"cat": "priv", "price": 180_000,   "title": "🕵️ Режим невидимки",  "desc": "Прячет тебя из /top. Включается один раз."},
+
+    # Сюрпризы
+    "lootbox":      {"cat": "fun", "price": 150_000,   "title": "🎁 Лут-бокс",        "desc": "Случайный приз: монеты, бусты или предметы."},
+    "scratch_pack": {"cat": "fun", "price": 25_000,    "title": "🎟 Пачка скретчей x3", "desc": "Три мгновенных скретч-билета по цене двух."},
 }
+
+CATEGORY_LABELS = {
+    "boosts": "🔥 Бусты",
+    "inv":    "🎒 Инвентарь",
+    "priv":   "👑 Привилегии",
+    "fun":    "🎁 Сюрпризы",
+}
+
+PRIVILEGE_RANK = {"none": 0, "bronze": 1, "silver": 2, "gold": 3}
+PRIVILEGE_LABEL = {"none": "—", "bronze": "🥉 Bronze", "silver": "🥈 Silver", "gold": "🥇 Gold"}
 
 STACK_LIMITS = {
     "mine_shield": 10,
@@ -160,19 +183,34 @@ STACK_LIMITS = {
     "safe_box": 5,
     "gold_ticket": 5,
     "energy_drink": 10,
+    "scratch_pack": 20,
 }
 
 
-def _render_shop(balance: int) -> tuple[str, types.InlineKeyboardMarkup]:
+def _render_shop(balance: int, cat: str | None = None) -> tuple[str, types.InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
+    if cat is None:
+        for key, label in CATEGORY_LABELS.items():
+            builder.button(text=label, callback_data=f"shop:cat:{key}")
+        builder.adjust(2, 2)
+        text = (
+            "🛒 <b>МАГАЗИН</b>\n"
+            f"💳 Баланс: <b>{balance:,}</b> 💎\n\n"
+            "Выбери раздел."
+        )
+        return text, builder.as_markup()
+
     for key, meta in SHOP_CATALOG.items():
+        if meta["cat"] != cat:
+            continue
         builder.button(
             text=f"{meta['title']} · {meta['price']:,} 💎",
             callback_data=f"buy:{key}",
         )
+    builder.button(text="⬅️ К разделам", callback_data="shop:back")
     builder.adjust(1)
     text = (
-        "🛒 <b>МАГАЗИН</b>\n"
+        f"🛒 <b>{CATEGORY_LABELS.get(cat, 'Магазин')}</b>\n"
         f"💳 Баланс: <b>{balance:,}</b> 💎\n\n"
         "Нажми на предмет — покажу описание и предложу купить."
     )
@@ -198,6 +236,104 @@ async def shop_cmd(event: types.Message | types.CallbackQuery):
             await event.message.answer(text, reply_markup=markup, parse_mode="HTML")
     else:
         await event.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+LOOTBOX_POOL = [
+    ("coins",        20, (30_000, 80_000)),
+    ("coins_big",     8, (150_000, 400_000)),
+    ("jackpot",       1, (800_000, 1_500_000)),
+    ("boost",         8, None),
+    ("mine_shield",  12, None),
+    ("mine_scan",    10, None),
+    ("energy",       12, None),
+    ("reroll",       10, None),
+    ("insure",        8, None),
+    ("gold_ticket",   6, None),
+    ("scratch",       5, None),
+]
+
+BONUS_POOL = [
+    ("coins",        35, (3_000, 7_000)),
+    ("coins_mid",    20, (10_000, 25_000)),
+    ("coins_big",     8, (40_000, 90_000)),
+    ("jackpot",       2, (200_000, 600_000)),
+    ("boost",         6, None),
+    ("mine_shield",  10, None),
+    ("energy",        8, None),
+    ("scratch",       6, None),
+    ("gold_ticket",   3, None),
+    ("reroll",        2, None),
+]
+
+
+def _pick_weighted(pool):
+    total = sum(w for _, w, _ in pool)
+    roll = random.uniform(0, total)
+    acc = 0
+    for key, weight, rng in pool:
+        acc += weight
+        if roll <= acc:
+            return key, rng
+    return pool[-1][0], pool[-1][2]
+
+
+def _award_prize(uid: int, key: str, rng) -> str:
+    """Начисляет выигрыш из пула и возвращает текст приза."""
+    if key in ("coins", "coins_mid", "coins_big", "jackpot"):
+        amount = random.randint(*rng)
+        cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (amount, uid))
+        return f"💎 {amount:,} монет"
+    if key == "boost":
+        now = int(time.time())
+        cursor.execute(
+            "UPDATE users SET boost_end = MAX(COALESCE(boost_end, 0), ?) + 12 * 3600 "
+            "WHERE id = ?",
+            (now, uid),
+        )
+        return "🔥 Буст x2 на 12 часов"
+    if key == "mine_shield":
+        cursor.execute("UPDATE users SET mine_shield = COALESCE(mine_shield, 0) + 1 WHERE id = ?", (uid,))
+        return "🛡 Саперный щит"
+    if key == "mine_scan":
+        cursor.execute("UPDATE users SET mine_scan = COALESCE(mine_scan, 0) + 2 WHERE id = ?", (uid,))
+        return "🔍 2× Сканер мин"
+    if key == "energy":
+        cursor.execute("UPDATE users SET energy_drink = COALESCE(energy_drink, 0) + 1 WHERE id = ?", (uid,))
+        return "⚡️ Энергетик"
+    if key == "reroll":
+        cursor.execute("UPDATE users SET rerolls = COALESCE(rerolls, 0) + 1 WHERE id = ?", (uid,))
+        return "🔄 Переброс кубика"
+    if key == "insure":
+        cursor.execute("UPDATE users SET bet_insure = COALESCE(bet_insure, 0) + 1 WHERE id = ?", (uid,))
+        return "🃏 Страховка ставки"
+    if key == "gold_ticket":
+        cursor.execute("UPDATE users SET gold_ticket = COALESCE(gold_ticket, 0) + 1 WHERE id = ?", (uid,))
+        return "🎟 Золотой билет"
+    if key == "scratch":
+        cursor.execute("UPDATE users SET scratch_pack = COALESCE(scratch_pack, 0) + 1 WHERE id = ?", (uid,))
+        return "🎟 Скретч-билет"
+    return "пустой приз"
+
+
+def _open_lootbox(uid: int) -> str:
+    key, rng = _pick_weighted(LOOTBOX_POOL)
+    return _award_prize(uid, key, rng)
+
+
+@router.callback_query(F.data.startswith("shop:cat:"))
+async def shop_category(call: types.CallbackQuery):
+    await call.answer()
+    cat = call.data.split(":")[2]
+    if cat not in CATEGORY_LABELS:
+        return
+    u = db_get_user(call.from_user.id)
+    if not u:
+        return
+    text, markup = _render_shop(u[0], cat=cat)
+    try:
+        await call.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("buy:"))
@@ -249,6 +385,11 @@ def _check_already_owns(item: str, uid: int) -> str | None:
         return "Безлимит уже активирован — покупка заблокирована."
     if item == "incognito" and u.get("incognito_mode") == 1:
         return "Режим невидимки уже включён — покупка заблокирована."
+    if item in ("vip_bronze", "vip_silver", "vip_gold"):
+        tier = item.split("_", 1)[1]
+        current = u.get("privilege", "none") or "none"
+        if PRIVILEGE_RANK.get(current, 0) >= PRIVILEGE_RANK[tier]:
+            return f"У тебя уже {PRIVILEGE_LABEL[current]} — покупка заблокирована."
     if item == "boost_x2":
         now = int(time.time())
         boost_end = u.get("boost_end", 0) or 0
@@ -323,6 +464,19 @@ def _apply_purchase(item: str, uid: int) -> tuple[bool, str]:
         elif item == "incognito":
             cursor.execute("UPDATE users SET incognito_mode = 1 WHERE id = ?", (uid,))
             msg = "🕵️ Режим невидимки включён."
+        elif item in ("vip_bronze", "vip_silver", "vip_gold"):
+            tier = item.split("_", 1)[1]
+            cursor.execute("UPDATE users SET privilege = ? WHERE id = ?", (tier, uid))
+            msg = f"👑 Теперь у тебя {PRIVILEGE_LABEL[tier]}."
+        elif item == "scratch_pack":
+            cursor.execute(
+                "UPDATE users SET scratch_pack = COALESCE(scratch_pack, 0) + 3 WHERE id = ?",
+                (uid,),
+            )
+            msg = "🎟 В инвентарь добавлено 3 скретч-билета."
+        elif item == "lootbox":
+            prize_msg = _open_lootbox(uid)
+            msg = f"🎁 Лут-бокс вскрыт: {prize_msg}"
         else:
             cursor.execute("ROLLBACK")
             return False, "❌ Неизвестный предмет."
@@ -363,39 +517,50 @@ async def buy_confirm(call: types.CallbackQuery):
 async def get_bonus(message: types.Message):
     user_id = message.from_user.id
     now = int(time.time())
-    reward = 5000
     cooldown = 86400
 
     try:
         cursor.execute("BEGIN IMMEDIATE")
         cursor.execute(
-            "UPDATE users SET balance = balance + ?, last_bonus = ? "
-            "WHERE id = ? AND (? - COALESCE(last_bonus, 0)) >= ?",
-            (reward, now, user_id, now, cooldown),
+            "SELECT last_bonus, energy_drink, privilege FROM users WHERE id = ?",
+            (user_id,),
         )
-        if cursor.rowcount == 0:
+        row = cursor.fetchone() or (0, 0, "none")
+        last_bonus, drinks, privilege = row[0] or 0, row[1] or 0, row[2] or "none"
+
+        if (now - last_bonus) < cooldown:
             cursor.execute("ROLLBACK")
-            cursor.execute(
-                "SELECT last_bonus, energy_drink FROM users WHERE id = ?", (user_id,)
-            )
-            row = cursor.fetchone() or (0, 0)
-            last_bonus, drinks = row[0] or 0, row[1] or 0
             kb = InlineKeyboardBuilder()
             if drinks > 0:
                 kb.button(text=f"⚡️ Выпить энергетик ({drinks})", callback_data="use:energy")
             remains = max(0, cooldown - (now - last_bonus)) // 3600
             return await message.answer(
-                f"⏳ Бонус будет доступен через {remains} ч.",
+                f"⏳ Ежедневный бонус ещё в КД. Осталось: ~{remains} ч.",
                 reply_markup=kb.as_markup(),
             )
+
+        pool = BONUS_POOL
+        rolls = 2 if privilege == "gold" else 1
+        prizes: list[str] = []
+        for _ in range(rolls):
+            key, rng = _pick_weighted(pool)
+            prizes.append(_award_prize(user_id, key, rng))
+
+        cursor.execute(
+            "UPDATE users SET last_bonus = ? WHERE id = ?",
+            (now, user_id),
+        )
         conn.commit()
     except Exception:
         cursor.execute("ROLLBACK")
         logger.exception("bonus: failed")
         return await message.answer("❌ Ошибка, попробуй ещё раз.")
 
+    tier_badge = PRIVILEGE_LABEL.get(privilege, "—")
     await message.answer(
-        f"🎁 Ежедневный бонус зачислен: <b>{reward:,}</b> 💎",
+        "🎁 <b>Ежедневный бонус</b>\n"
+        f"Привилегия: {tier_badge}\n\n"
+        + "\n".join(f"• {p}" for p in prizes),
         parse_mode="HTML",
     )
 
@@ -474,7 +639,7 @@ async def games_list(message: types.Message):
         "🎲 `/dice [ставка]` - Кости (дуэль)\n"
         "🏀 `/basket [ставка]` - Баскетбол\n"
         "⚽ `/football [ставка]` - Пенальти\n"
-        "⚔️ `/pvp` - PvP-дуэли с игроками\n"
+        "🌐 `/online` - Онлайн-дуэли 1×1 (кости/дартс/рулетка/монетка)\n"
         "🚀 `/crash` - Краш (полёт множителя)\n"
         "🎫 `/lottery` - Лотерейный центр\n"
         "🎟 `/scratch` - Мгновенная лотерея\n"

@@ -1,101 +1,475 @@
-import datetime
-import time
-import random
-import logging
+"""Лотерейный центр: часовая, недельная, мега, мгновенная и пользовательская.
+
+Система системных лотерей (hourly/weekly/mega) устроена по-классически:
+- Покупаешь билет → генерируется набор номеров (tickets.numbers), он сохраняется
+  в инвентаре. Можно посмотреть в любой момент.
+- В конце тиража бот выбирает набор "выигрышных" номеров и сверяет каждый билет
+  текущего тиража. Призы зависят от количества совпавших номеров.
+- После розыгрыша билет переходит в "корзину" (status='archived') с записанной
+  суммой выигрыша (win) и номерами текущего тиража. Там его можно посмотреть.
+
+Мгновенная лотерея тоже сохраняет билеты: покупаешь → бот сразу выбирает
+номера и считает, билет уходит в архив с результатом — его видно в инвентаре.
+
+Пользовательские (созданные игроками) лотереи инвентарь/архив не используют —
+как просил пользователь, это одноразовые розыгрыши без следа в истории.
+"""
 import asyncio
-import sqlite3
-from aiogram import Router, types, F
+import datetime
+import logging
+import random
+import time
+from typing import List, Tuple
+
+from aiogram import F, Router, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from database import db_get_user, db_update_stats, cursor, conn, DB_FILE
-from Handlers.common import check_user
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-
+from database import conn, cursor, db_get_user, db_update_stats
+from Handlers.common import check_user
 
 logger = logging.getLogger(__name__)
-
-class CreateLottery(StatesGroup):
-    """Класс состояний для пошагового создания пользовательской лотереи."""
-    title = State()          # Название розыгрыша
-    prize_pool = State()     # Сумма выигрыша
-    ticket_price = State()   # Цена одного билета
-    max_tickets = State()    # Общее количество билетов
-    confirm = State()        # Подтверждение и оплата
-
-HOURLY_PRICE = 1000         # Цена билета в часовой лотерее (возросла с 500)
-HOURLY_LIMIT = 10           # Лимит билетов в час для одного игрока
-WEEKLY_PRICE = 7000         # Цена билета в недельной лотерее (возросла с 5000)
-WEEKLY_LIMIT = 5            # Лимит билетов в неделю
-MEGA_PRICE = 150000         # МЕГА-ЛОТЕРЕЯ высоких ставок (НОВО!)
-MEGA_LIMIT = 3              # Лимит мега-билетов в неделю
-PRO_PRICE = 150000          # Цена в Про-лотерее (возросла с 100k)
-PRO_LIMIT = 2               # Лимит билетов в сутки
-COMBO_DISCOUNT = 0.15       # Скидка за комбо (3+ билета = -15%)
-SYSTEM_FEE = 0.05           # Комиссия системы (5%)
-
 router = Router()
 
 
+HOURLY = {
+    "key": "hourly",
+    "state": "hourly_state",
+    "title": "🕐 Часовая",
+    "price": 1_000,
+    "limit_per_period": 10,
+    "pool_share": 0.95,
+    "numbers_count": 3,
+    "numbers_pool": 30,
+    "period_seconds": 3600,
+    "prizes": {3: "jackpot", 2: 5, 1: 1},
+}
+WEEKLY = {
+    "key": "weekly",
+    "state": "weekly_state",
+    "title": "📅 Недельная",
+    "price": 7_000,
+    "limit_per_period": 20,
+    "pool_share": 0.80,
+    "numbers_count": 5,
+    "numbers_pool": 49,
+    "period_seconds": 7 * 24 * 3600,
+    "prizes": {5: "jackpot", 4: 50, 3: 10, 2: 2},
+}
+MEGA = {
+    "key": "mega",
+    "state": "mega_state",
+    "title": "🐳 Мега",
+    "price": 150_000,
+    "limit_per_period": 5,
+    "pool_share": 1.0,
+    "numbers_count": 6,
+    "numbers_pool": 60,
+    "period_seconds": 7 * 24 * 3600,
+    "prizes": {6: "jackpot", 5: 100, 4: 20, 3: 3},
+}
+
+LOTTERIES = {cfg["key"]: cfg for cfg in (HOURLY, WEEKLY, MEGA)}
+
 SCRATCH_PRICE = 2_500
 SCRATCH_PRIZES = [
-    {"mult": 0,   "weight": 55},
-    {"mult": 1,   "weight": 20},
-    {"mult": 2,   "weight": 15},
-    {"mult": 5,   "weight": 7},
-    {"mult": 20,  "weight": 2},
+    {"mult": 0, "weight": 55},
+    {"mult": 1, "weight": 20},
+    {"mult": 2, "weight": 15},
+    {"mult": 5, "weight": 7},
+    {"mult": 20, "weight": 2},
     {"mult": 100, "weight": 1},
 ]
 
 
-def get_main_kb():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🕐 Часовая (1000)", callback_data="view_hourly")
-    builder.button(text="📅 Недельная (7000)", callback_data="view_weekly")
-    builder.button(text="🐳 МЕГА (150k)", callback_data="view_mega")
-    builder.button(text="🎟 Мгновенная (2 500)", callback_data="view_scratch")
-    builder.button(text="🎪 User-лотереи", callback_data="view_user_lotteries")
-    builder.button(text="🏠 В профиль", callback_data="back_to_profile")
-    builder.adjust(2, 2, 1, 1)
-    return builder.as_markup()
+class CreateLottery(StatesGroup):
+    title = State()
+    prize_pool = State()
+    ticket_price = State()
+    max_tickets = State()
+    confirm = State()
+
+
+# ─────────────── утилиты ───────────────
+
+def pick_numbers(count: int, pool: int) -> List[int]:
+    """Генерирует отсортированный набор уникальных номеров 1..pool."""
+    return sorted(random.sample(range(1, pool + 1), count))
+
+
+def format_numbers(numbers: List[int]) -> str:
+    return " ".join(f"<code>{n:02d}</code>" for n in numbers)
+
+
+def current_draw(cfg) -> Tuple[int, int]:
+    """Возвращает (draw_id, prize_pool) активного тиража (создаёт, если нет)."""
+    cursor.execute(f"SELECT draw_id, prize_pool FROM {cfg['state']} WHERE winning_numbers = '' ORDER BY draw_id DESC LIMIT 1")
+    row = cursor.fetchone()
+    if row:
+        return row[0], row[1]
+
+    defaults = {"hourly": 100_000, "weekly": 1_000_000, "mega": 5_000_000}
+    base = defaults[cfg["key"]]
+    cursor.execute(
+        f"INSERT INTO {cfg['state']} (prize_pool) VALUES (?)",
+        (base,),
+    )
+    conn.commit()
+    return cursor.lastrowid, base
+
+
+def period_start(cfg) -> int:
+    now = int(time.time())
+    if cfg["key"] == "hourly":
+        return now - (now % 3600)
+    d = datetime.datetime.now()
+    start_of_week = d - datetime.timedelta(days=d.weekday())
+    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(start_of_week.timestamp())
+
+
+def user_active_tickets(user_id: int, cfg, draw_id: int) -> List[tuple]:
+    cursor.execute(
+        "SELECT id, numbers FROM lottery_tickets "
+        "WHERE user_id = ? AND lottery_type = ? AND draw_id = ? AND status = 'active' "
+        "ORDER BY id",
+        (user_id, cfg["key"], draw_id),
+    )
+    return cursor.fetchall()
+
+
+def user_archived_tickets(user_id: int, cfg, limit: int = 10) -> List[tuple]:
+    cursor.execute(
+        "SELECT id, numbers, win, draw_id FROM lottery_tickets "
+        "WHERE user_id = ? AND lottery_type = ? AND status = 'archived' "
+        "ORDER BY id DESC LIMIT ?",
+        (user_id, cfg["key"], limit),
+    )
+    return cursor.fetchall()
+
+
+def bought_in_period(user_id: int, cfg) -> int:
+    cursor.execute(
+        "SELECT COUNT(*) FROM lottery_tickets "
+        "WHERE user_id = ? AND lottery_type = ? AND buy_time >= ?",
+        (user_id, cfg["key"], period_start(cfg)),
+    )
+    return cursor.fetchone()[0]
+
+
+def time_left_hourly() -> str:
+    now = datetime.datetime.now()
+    nxt = (now + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    diff = nxt - now
+    m, s = divmod(diff.seconds, 60)
+    return f"{m:02d}:{s:02d}"
+
+
+def time_left_weekly() -> str:
+    now = datetime.datetime.now()
+    days_ahead = 6 - now.weekday()
+    end = (now + datetime.timedelta(days=days_ahead)).replace(hour=23, minute=59, second=59, microsecond=0)
+    diff = end - now
+    d = diff.days
+    h, rem = divmod(diff.seconds, 3600)
+    m, _ = divmod(rem, 60)
+    return f"{d}д {h}ч {m}м"
+
+
+# ─────────────── главное меню ───────────────
+
+def main_menu_kb() -> types.InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🕐 Часовая",    callback_data="lot:menu:hourly")
+    kb.button(text="📅 Недельная",  callback_data="lot:menu:weekly")
+    kb.button(text="🐳 Мега",        callback_data="lot:menu:mega")
+    kb.button(text="🎟 Мгновенная", callback_data="lot:scratch")
+    kb.button(text="🎪 Пользовательские", callback_data="lot:user")
+    kb.button(text="🗑 Мои использованные билеты", callback_data="lot:archive")
+    kb.button(text="🏠 В профиль", callback_data="lot:close")
+    kb.adjust(3, 1, 1, 1, 1)
+    return kb.as_markup()
+
+
+def main_menu_text() -> str:
+    return (
+        "🎰 <b>Лотерейный центр</b>\n\n"
+        "• <b>Часовая</b> — 3 номера из 30, розыгрыш каждый час.\n"
+        "• <b>Недельная</b> — 5 из 49, розыгрыш в воскресенье 23:59.\n"
+        "• <b>Мега</b> — 6 из 60, раз в неделю, весь банк одному.\n"
+        "• <b>Мгновенная</b> — моментальный скретч.\n"
+        "• <b>Пользовательские</b> — розыгрыши от игроков.\n\n"
+        "Купленные билеты лежат в инвентаре каждой лотереи, "
+        "использованные — в «🗑 Мои использованные билеты»."
+    )
 
 
 @router.message(Command("lottery"))
-async def lottery_menu(message: types.Message):
-    """Точка входа в меню лотерей (НОВОЕ: упрощенное)."""
-    if not await check_user(message): 
+async def lottery_cmd(message: types.Message, state: FSMContext):
+    if not await check_user(message):
         return
-    
-    logger.info(f"User {message.from_user.id} opened lottery menu")
-    text = (
-        "🎰 <b>ГЛАВНОЕ МЕНЮ ЛОТЕРЕЙ</b>\n\n"
-        "<b>📢 ТРИ ТИПА ВЫИГЫШЕЙ:</b>\n"
-        "🕐 <b>Часовая</b> - джекпот каждый час (1000 💎)\n"
-        "📅 <b>Недельная</b> - НГ в воскресенье (7000 💎)\n"
-        "🐳 <b>МЕГА</b> - ВСЕ ИДЕТ ОДНОМУ! (150k 💎) ⭐\n\n"
-        "💝 <b>КОМБО СКИДКИ:</b>\n"
-        "Купи 3+ билета одной лотереи → скидка 15%!\n\n"
-        "Твой выбор ниже 👇"
-    )
-    await message.answer(text, reply_markup=get_main_kb(), parse_mode="HTML")
-
-@router.callback_query(F.data == "lottery_main")
-async def lottery_main_callback(call: types.CallbackQuery, state: FSMContext):
-    """Возврат в главное меню из любого раздела."""
     await state.clear()
-    await call.message.edit_text("🎰 <b>ГЛАВНОЕ МЕНЮ ЛОТЕРЕЙ</b>", reply_markup=get_main_kb(), parse_mode="HTML")
+    await message.answer(main_menu_text(), reply_markup=main_menu_kb(), parse_mode="HTML")
 
-@router.callback_query(F.data == "back_to_profile")
-async def back_to_profile(call: types.CallbackQuery):
-    """Удаление сообщения меню и возврат в главное меню бота."""
+
+@router.callback_query(F.data == "lot:main")
+async def lot_main(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.answer()
+    try:
+        await call.message.edit_text(main_menu_text(), reply_markup=main_menu_kb(), parse_mode="HTML")
+    except Exception:
+        await call.message.answer(main_menu_text(), reply_markup=main_menu_kb(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "lot:close")
+async def lot_close(call: types.CallbackQuery):
     await call.answer()
     try:
         await call.message.delete()
-    except Exception as e:
-        logger.error(f"Error deleting message: {e}")
+    except Exception:
+        pass
 
+
+# ─────────────── системная лотерея: меню, покупка, инвентарь ───────────────
+
+def render_lottery_menu(user_id: int, cfg) -> Tuple[str, types.InlineKeyboardMarkup]:
+    draw_id, pool = current_draw(cfg)
+    in_period = bought_in_period(user_id, cfg)
+    active = user_active_tickets(user_id, cfg, draw_id)
+
+    if cfg["key"] == "hourly":
+        time_str = f"⏳ До розыгрыша: <code>{time_left_hourly()}</code>"
+    elif cfg["key"] == "weekly":
+        time_str = f"⏳ До розыгрыша: <code>{time_left_weekly()}</code>"
+    else:
+        time_str = f"⏳ До розыгрыша: <code>{time_left_weekly()}</code>"
+
+    prizes = cfg["prizes"]
+    prize_lines = []
+    for m in sorted(prizes.keys(), reverse=True):
+        v = prizes[m]
+        label = "🏆 ВЕСЬ БАНК" if v == "jackpot" else f"×{v} от цены билета"
+        prize_lines.append(f"• <b>{m}</b> совпад. — {label}")
+
+    text = (
+        f"{cfg['title']} <b>лотерея #{draw_id}</b>\n"
+        f"{time_str}\n"
+        f"💰 Банк тиража: <b>{pool:,}</b> 💎\n"
+        f"🎫 Цена билета: <b>{cfg['price']:,}</b> 💎\n"
+        f"📦 Формат: <b>{cfg['numbers_count']} из {cfg['numbers_pool']}</b>\n"
+        f"🎯 Лимит в период: <code>{in_period}/{cfg['limit_per_period']}</code>\n\n"
+        "<b>Призы:</b>\n" + "\n".join(prize_lines) + "\n\n"
+        f"Твои активные билеты: <b>{len(active)}</b>"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"🎫 Купить 1 билет ({cfg['price']:,} 💎)", callback_data=f"lot:buy:{cfg['key']}:1")
+    kb.button(text=f"🎫 Купить 3 ({int(cfg['price'] * 3 * 0.9):,} 💎, −10%)", callback_data=f"lot:buy:{cfg['key']}:3")
+    kb.button(text=f"📋 Мои билеты ({len(active)})", callback_data=f"lot:tickets:{cfg['key']}")
+    kb.button(text="⬅️ Назад", callback_data="lot:main")
+    kb.adjust(1)
+    return text, kb.as_markup()
+
+
+@router.callback_query(F.data.startswith("lot:menu:"))
+async def lot_menu(call: types.CallbackQuery):
+    await call.answer()
+    key = call.data.split(":", 2)[2]
+    cfg = LOTTERIES.get(key)
+    if not cfg:
+        return
+    text, markup = render_lottery_menu(call.from_user.id, cfg)
+    try:
+        await call.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("lot:buy:"))
+async def lot_buy(call: types.CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":")
+    key, count_str = parts[2], parts[3]
+    cfg = LOTTERIES.get(key)
+    if not cfg:
+        return
+    count = int(count_str)
+    if count not in (1, 3):
+        return
+
+    user_id = call.from_user.id
+    price_each = cfg["price"]
+    total = price_each * count
+    if count == 3:
+        total = int(total * 0.9)
+
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute("SELECT balance FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute("ROLLBACK")
+            return await call.message.answer("❌ Профиль не найден.")
+        if row[0] < total:
+            cursor.execute("ROLLBACK")
+            return await call.message.answer(
+                f"❌ Нужно {total:,} 💎, а у тебя {row[0]:,} 💎."
+            )
+
+        in_period = bought_in_period(user_id, cfg)
+        if in_period + count > cfg["limit_per_period"]:
+            cursor.execute("ROLLBACK")
+            return await call.message.answer(
+                f"❌ Лимит {cfg['limit_per_period']} билетов за период. Сейчас у тебя {in_period}."
+            )
+
+        cursor.execute(
+            "UPDATE users SET balance = balance - ? WHERE id = ?",
+            (total, user_id),
+        )
+
+        draw_id, _ = current_draw(cfg)
+        now = int(time.time())
+        created_numbers = []
+        for _ in range(count):
+            nums = pick_numbers(cfg["numbers_count"], cfg["numbers_pool"])
+            created_numbers.append(nums)
+            cursor.execute(
+                "INSERT INTO lottery_tickets (user_id, lottery_type, buy_time, numbers, draw_id, status, win) "
+                "VALUES (?, ?, ?, ?, ?, 'active', 0)",
+                (user_id, cfg["key"], now, ",".join(str(n) for n in nums), draw_id),
+            )
+
+        into_pool = int(total * cfg["pool_share"])
+        cursor.execute(
+            f"UPDATE {cfg['state']} SET prize_pool = prize_pool + ? WHERE draw_id = ?",
+            (into_pool, draw_id),
+        )
+        conn.commit()
+    except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("lottery:%s: ошибка покупки", cfg["key"])
+        return await call.message.answer("❌ Ошибка покупки, попробуй ещё раз.")
+
+    lines = [f"{cfg['title']} тираж #{draw_id} — куплено билетов: <b>{count}</b>"]
+    for i, nums in enumerate(created_numbers, 1):
+        lines.append(f"№{i}: {format_numbers(nums)}")
+    lines.append(f"\nСписано: <b>{total:,}</b> 💎")
+    new_bal = db_get_user(user_id)[0]
+    lines.append(f"💳 Баланс: <b>{new_bal:,}</b> 💎")
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📋 Мои билеты", callback_data=f"lot:tickets:{cfg['key']}")
+    kb.button(text="⬅️ В меню лотереи", callback_data=f"lot:menu:{cfg['key']}")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text("\n".join(lines), reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        await call.message.answer("\n".join(lines), reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("lot:tickets:"))
+async def lot_tickets(call: types.CallbackQuery):
+    await call.answer()
+    key = call.data.split(":", 2)[2]
+    cfg = LOTTERIES.get(key)
+    if not cfg:
+        return
+    draw_id, _ = current_draw(cfg)
+    active = user_active_tickets(call.from_user.id, cfg, draw_id)
+
+    if not active:
+        text = f"{cfg['title']} лотерея — у тебя нет активных билетов в тираже #{draw_id}."
+    else:
+        lines = [f"{cfg['title']} лотерея — твои билеты (тираж #{draw_id})\n"]
+        for i, (tid, nums_str) in enumerate(active, 1):
+            nums = [int(x) for x in nums_str.split(",")]
+            lines.append(f"🎫 №{i} (id {tid}): {format_numbers(nums)}")
+        text = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data=f"lot:menu:{cfg['key']}")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+# ─────────────── архив / корзина использованных билетов ───────────────
+
+@router.callback_query(F.data == "lot:archive")
+async def lot_archive_menu(call: types.CallbackQuery):
+    await call.answer()
+    kb = InlineKeyboardBuilder()
+    for cfg in (HOURLY, WEEKLY, MEGA, {"key": "scratch", "title": "🎟 Мгновенная"}):
+        kb.button(text=cfg["title"], callback_data=f"lot:arch:{cfg['key']}")
+    kb.button(text="⬅️ Назад", callback_data="lot:main")
+    kb.adjust(2, 2, 1)
+    try:
+        await call.message.edit_text(
+            "🗑 <b>Корзина билетов</b>\nЗдесь лежат уже разыгранные билеты. Выбери лотерею:",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
+    except Exception:
+        await call.message.answer(
+            "🗑 <b>Корзина билетов</b>",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(F.data.startswith("lot:arch:"))
+async def lot_archive_show(call: types.CallbackQuery):
+    await call.answer()
+    key = call.data.split(":", 2)[2]
+    if key == "scratch":
+        cursor.execute(
+            "SELECT id, numbers, win FROM lottery_tickets "
+            "WHERE user_id = ? AND lottery_type = 'scratch' AND status = 'archived' "
+            "ORDER BY id DESC LIMIT 15",
+            (call.from_user.id,),
+        )
+        rows = cursor.fetchall()
+        title = "🎟 Мгновенная"
+    else:
+        cfg = LOTTERIES.get(key)
+        if not cfg:
+            return
+        rows = [
+            (tid, nums, win) for tid, nums, win, _ in user_archived_tickets(call.from_user.id, cfg, 15)
+        ]
+        title = cfg["title"]
+
+    if not rows:
+        text = f"{title} — архив пуст."
+    else:
+        lines = [f"{title} — последние {len(rows)} билетов:\n"]
+        for tid, nums_str, win in rows:
+            nums_disp = (
+                format_numbers([int(x) for x in nums_str.split(",")])
+                if nums_str
+                else "—"
+            )
+            outcome = f"выигрыш {win:,} 💎" if win > 0 else "без выигрыша"
+            lines.append(f"🗑 id {tid}: {nums_disp} — {outcome}")
+        text = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="lot:archive")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+# ─────────────── мгновенная лотерея ───────────────
 
 def scratch_pull() -> int:
     weights = [p["weight"] for p in SCRATCH_PRIZES]
@@ -105,48 +479,108 @@ def scratch_pull() -> int:
 def scratch_menu_text() -> str:
     return (
         "🎟 <b>Мгновенная лотерея</b>\n"
-        f"Цена: <b>{SCRATCH_PRICE:,}</b> 💎 за билет\n\n"
-        "Выплаты (множитель от цены билета):\n"
-        "• x0 — мимо (55%)\n"
-        "• x1 — возврат (20%)\n"
-        "• x2 (15%)\n"
-        "• x5 (7%)\n"
-        "• x20 (2%)\n"
-        "• x100 (1%) — супер-приз\n\n"
-        "Результат приходит сразу."
+        f"Цена билета: <b>{SCRATCH_PRICE:,}</b> 💎\n\n"
+        "Покупаешь билет — тут же стирается слой, видно результат.\n"
+        "Билет попадает в архив в «🗑 Мои использованные билеты».\n\n"
+        "<b>Выплаты (множитель от цены):</b>\n"
+        "• ×100 — 1%   • ×20 — 2%\n"
+        "• ×5  — 7%    • ×2 — 15%\n"
+        "• ×1  — 20%   • ×0 — 55%"
     )
 
 
-def scratch_menu_kb() -> InlineKeyboardBuilder:
+def scratch_menu_kb(free_count: int = 0) -> types.InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"🎟 Купить 1 билет ({SCRATCH_PRICE:,})", callback_data="scratch:buy:1")
-    kb.button(text=f"🎟 Купить 5 билетов ({SCRATCH_PRICE * 5:,})", callback_data="scratch:buy:5")
-    kb.button(text="🔙 Назад", callback_data="lottery_main")
+    if free_count > 0:
+        kb.button(
+            text=f"🎁 Использовать свой ({free_count})",
+            callback_data="lot:scratch:use_free",
+        )
+    kb.button(text=f"🎟 1 билет ({SCRATCH_PRICE:,} 💎)", callback_data="lot:scratch:buy:1")
+    kb.button(text=f"🎟 5 билетов ({SCRATCH_PRICE * 5:,} 💎)", callback_data="lot:scratch:buy:5")
+    kb.button(text="⬅️ Назад", callback_data="lot:main")
     kb.adjust(1)
-    return kb
+    return kb.as_markup()
+
+
+def _user_free_scratch(user_id: int) -> int:
+    cursor.execute("SELECT COALESCE(scratch_pack, 0) FROM users WHERE id = ?", (user_id,))
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+@router.callback_query(F.data == "lot:scratch")
+async def lot_scratch_menu(call: types.CallbackQuery):
+    await call.answer()
+    free = _user_free_scratch(call.from_user.id)
+    try:
+        await call.message.edit_text(scratch_menu_text(), reply_markup=scratch_menu_kb(free), parse_mode="HTML")
+    except Exception:
+        await call.message.answer(scratch_menu_text(), reply_markup=scratch_menu_kb(free), parse_mode="HTML")
 
 
 @router.message(Command("scratch"))
 async def scratch_cmd(message: types.Message):
     if not await check_user(message):
         return
-    await message.answer(
-        scratch_menu_text(), reply_markup=scratch_menu_kb().as_markup(), parse_mode="HTML"
-    )
+    free = _user_free_scratch(message.from_user.id)
+    await message.answer(scratch_menu_text(), reply_markup=scratch_menu_kb(free), parse_mode="HTML")
 
 
-@router.callback_query(F.data == "view_scratch")
-async def scratch_view(call: types.CallbackQuery):
+@router.callback_query(F.data == "lot:scratch:use_free")
+async def lot_scratch_use_free(call: types.CallbackQuery):
     await call.answer()
-    await call.message.edit_text(
-        scratch_menu_text(), reply_markup=scratch_menu_kb().as_markup(), parse_mode="HTML"
-    )
+    user_id = call.from_user.id
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            "UPDATE users SET scratch_pack = scratch_pack - 1 "
+            "WHERE id = ? AND COALESCE(scratch_pack, 0) > 0",
+            (user_id,),
+        )
+        if cursor.rowcount == 0:
+            cursor.execute("ROLLBACK")
+            return await call.answer("❌ Бесплатных скретчей нет.", show_alert=True)
+        mult = scratch_pull()
+        win = SCRATCH_PRICE * mult
+        now = int(time.time())
+        cursor.execute(
+            "INSERT INTO lottery_tickets (user_id, lottery_type, buy_time, numbers, draw_id, status, win) "
+            "VALUES (?, 'scratch', ?, ?, 0, 'archived', ?)",
+            (user_id, now, f"×{mult}", win),
+        )
+        if win > 0:
+            cursor.execute(
+                "UPDATE users SET balance = balance + ? WHERE id = ?",
+                (win, user_id),
+            )
+        conn.commit()
+    except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("lot:scratch:use_free")
+        return await call.answer("❌ Ошибка.", show_alert=True)
+
+    bal = db_get_user(user_id)[0]
+    emoji = "🎉" if mult >= 5 else ("✨" if mult >= 1 else "❌")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎟 Ещё скретч", callback_data="lot:scratch")
+    kb.button(text="⬅️ В лотереи", callback_data="lot:main")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(
+            f"{emoji} Скретч сыграл: ×{mult} → <b>{win:,}</b> 💎\n"
+            f"💳 Баланс: {bal:,} 💎",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
 
 
-@router.callback_query(F.data.startswith("scratch:buy:"))
-async def scratch_buy(call: types.CallbackQuery):
+@router.callback_query(F.data.startswith("lot:scratch:buy:"))
+async def lot_scratch_buy(call: types.CallbackQuery):
     await call.answer()
-    count = int(call.data.split(":")[2])
+    count = int(call.data.split(":")[3])
     if count not in (1, 5):
         return
     total_price = SCRATCH_PRICE * count
@@ -154,17 +588,17 @@ async def scratch_buy(call: types.CallbackQuery):
 
     try:
         cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute("SELECT balance FROM users WHERE id = ?", (user_id,))
-        row = cursor.fetchone()
-        if not row or row[0] < total_price:
+        cursor.execute(
+            "UPDATE users SET balance = balance - ? WHERE id = ? AND balance >= ?",
+            (total_price, user_id, total_price),
+        )
+        if cursor.rowcount == 0:
             cursor.execute("ROLLBACK")
             return await call.message.answer(
-                f"❌ Нужно {total_price:,} 💎 для {count} билета(ов)."
+                f"❌ Нужно {total_price:,} 💎 на {count} билет(ов)."
             )
-        cursor.execute(
-            "UPDATE users SET balance = balance - ? WHERE id = ?", (total_price, user_id)
-        )
 
+        now = int(time.time())
         lines = []
         total_win = 0
         for _ in range(count):
@@ -172,7 +606,12 @@ async def scratch_buy(call: types.CallbackQuery):
             win = SCRATCH_PRICE * mult
             total_win += win
             emoji = "🎉" if mult >= 5 else ("✨" if mult >= 1 else "❌")
-            lines.append(f"{emoji} x{mult} → {win:,} 💎")
+            lines.append(f"{emoji} ×{mult} → {win:,} 💎")
+            cursor.execute(
+                "INSERT INTO lottery_tickets (user_id, lottery_type, buy_time, numbers, draw_id, status, win) "
+                "VALUES (?, 'scratch', ?, ?, 0, 'archived', ?)",
+                (user_id, now, f"×{mult}", win),
+            )
 
         if total_win > 0:
             cursor.execute(
@@ -182,744 +621,428 @@ async def scratch_buy(call: types.CallbackQuery):
         conn.commit()
     except Exception:
         cursor.execute("ROLLBACK")
-        logger.exception("scratch: ошибка покупки")
-        return await call.message.answer("❌ Ошибка покупки. Попробуй ещё раз.")
+        logger.exception("lot:scratch: ошибка")
+        return await call.message.answer("❌ Ошибка покупки, попробуй ещё раз.")
 
-    new_balance = db_get_user(user_id)[0]
+    new_bal = db_get_user(user_id)[0]
     delta = total_win - total_price
     text = (
-        f"🎟 <b>Мгновенная лотерея — {count} билет(ов)</b>\n\n"
+        f"🎟 Куплено билетов: <b>{count}</b>\n\n"
         + "\n".join(lines)
         + f"\n\nИтог: {'+' if delta >= 0 else ''}{delta:,} 💎\n"
-        + f"💳 Баланс: {new_balance:,} 💎"
+        + f"💳 Баланс: <b>{new_bal:,}</b> 💎"
     )
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"🎟 Ещё 1 билет ({SCRATCH_PRICE:,})", callback_data="scratch:buy:1")
-    kb.button(text="🔙 В лотерею", callback_data="lottery_main")
+    kb.button(text=f"🎟 Ещё 1", callback_data="lot:scratch:buy:1")
+    kb.button(text="⬅️ В лотереи", callback_data="lot:main")
     kb.adjust(1)
-    await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
-
-
-@router.message(Command("lothourly"))
-async def fast_hourly(message: types.Message):
-    await show_hourly(message)
-
-@router.callback_query(F.data == "view_hourly")
-async def cb_view_hourly(call: types.CallbackQuery):
-    await show_hourly(call)
-
-async def show_hourly(event):
-    """Отображение состояния часовой лотереи с таймером."""
-    now = datetime.datetime.now()
-    next_hour = (now + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-    wait_time = next_hour - now
-    minutes, seconds = divmod(wait_time.seconds, 60)
-
-    cursor.execute("SELECT draw_id, prize_pool FROM hourly_state ORDER BY draw_id DESC LIMIT 1")
-    res = cursor.fetchone()
-    if res:
-        draw_id, pool = res
-    else:
-        draw_id, pool = 1, 100000
-        # Создаем первую запись если её нет
-        try:
-            cursor.execute("INSERT INTO hourly_state (draw_id, prize_pool) VALUES (1, 100000)")
-            conn.commit()
-        except Exception as e:
-            logger.error(f"Error creating hourly_state: {e}")
-    
-    user_id = event.from_user.id
-    start_of_hour = int(time.time()) // 3600 * 3600
-    cursor.execute("SELECT COUNT(*) FROM lottery_tickets WHERE user_id = ? AND lottery_type = 'hourly' AND buy_time > ?", (user_id, start_of_hour))
-    my_tickets = cursor.fetchone()[0]
-
-    text = (
-        f"🕐 <b>ЧАСОВАЯ ЛОТЕРЕЯ #{draw_id}</b>\n\n"
-        f"⏳ До розыгрыша: <code>{minutes:02d}:{seconds:02d}</code>\n"
-        f"💰 Текущий джекпот: <code>{pool:,}</code> 💎\n"
-        f"🎫 Ваших билетов: <code>{my_tickets}/{HOURLY_LIMIT}</code>\n\n"
-        f"<b>💝 КОМ БО СКИДКА:</b> Купи 3+ билета → скидка 15%!\n"
-        f"Цена: {HOURLY_PRICE:,} 💎 (или {int(HOURLY_PRICE * (1 - COMBO_DISCOUNT)):,} 💎 с комбо)"
-    )
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=f"🎫 КУПИТЬ 1 БИЛЕТ ({HOURLY_PRICE})", callback_data="buy_hourly_ticket:1")
-    builder.button(text=f"🎫 КУПИТЬ 3 БИЛЕТА (скидка)", callback_data="buy_hourly_ticket:3")
-    builder.button(text="🔙 НАЗАД", callback_data="lottery_main")
-    
-    if isinstance(event, types.Message):
-        await event.answer(text, reply_markup=builder.adjust(1).as_markup(), parse_mode="HTML")
-    else:
-        await event.message.edit_text(text, reply_markup=builder.adjust(1).as_markup(), parse_mode="HTML")
-
-@router.callback_query(F.data.startswith("buy_hourly_ticket:"))
-async def buy_hourly_ticket_proc(call: types.CallbackQuery):
-    user_id = call.from_user.id
-    ticket_count = int(call.data.split(":")[1])
-    
-    connect = sqlite3.connect(DB_FILE, check_same_thread=False)
-    connect.execute("BEGIN IMMEDIATE")
-    cur = connect.cursor()
-    
     try:
-        # Проверка баланса
-        cur.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-        user_row = cur.fetchone()
-        if not user_row:
-            connect.execute("ROLLBACK")
-            connect.close()
-            await call.answer("❌ Пользователь не найден!", show_alert=True)
-            return
-        
-        balance = user_row[0]
-        
-        # Расчет цены с комбо скидкой
-        if ticket_count >= 3:
-            final_price = int(HOURLY_PRICE * ticket_count * (1 - COMBO_DISCOUNT))
-        else:
-            final_price = HOURLY_PRICE * ticket_count
-        
-        if balance < final_price:
-            connect.execute("ROLLBACK")
-            connect.close()
-            await call.answer(f"❌ Недостаточно средств! Нужно {final_price:,} 💎", show_alert=True)
-            return
-        
-        # Проверка часовых лимитов
-        start_of_hour = int(time.time()) // 3600 * 3600
-        cur.execute("SELECT COUNT(*) FROM lottery_tickets WHERE user_id = ? AND lottery_type = 'hourly' AND buy_time > ?", (user_id, start_of_hour))
-        existing = cur.fetchone()[0]
-        if existing + ticket_count > HOURLY_LIMIT:
-            connect.execute("ROLLBACK")
-            connect.close()
-            await call.answer(f"❌ Лимит: не более {HOURLY_LIMIT} в час!", show_alert=True)
-            return
-        
-        # Обновляем баланс
-        cur.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (final_price, user_id))
-        
-        # Добавляем билеты
-        now = int(time.time())
-        for _ in range(ticket_count):
-            cur.execute("INSERT INTO lottery_tickets (user_id, lottery_type, buy_time) VALUES (?, ?, ?)", 
-                       (user_id, 'hourly', now))
-        
-        # Получаем текущий draw_id для обновления джекпота
-        cur.execute("SELECT draw_id FROM hourly_state ORDER BY draw_id DESC LIMIT 1")
-        draw_info = cur.fetchone()
-        draw_id = draw_info[0] if draw_info else 1
-        
-        # Обновляем джекпот (95% идет в банк)
-        cur.execute("UPDATE hourly_state SET prize_pool = prize_pool + ? WHERE draw_id = ?", 
-                   (int(final_price * 0.95), draw_id))
-        
-        connect.commit()
-        connect.close()
-        
-        discount_text = " 💝 СО СКИДКОЙ!" if ticket_count >= 3 else ""
-        await call.message.edit_text(
-            f"✅ Куплено {ticket_count} билет{'ов' if ticket_count != 1 else ''}{discount_text}\n\n"
-            f"💎 Потрачено: {final_price:,} 💎\n"
-            f"🍀 Удачи в розыгрыше!"
-        )
-        
-        await asyncio.sleep(2)
-        await show_hourly(call)
-        
-    except TelegramBadRequest as e:
-        cur.execute("ROLLBACK")
-        connect.close()
-        logger.warning(f"Callback timeout: {e}")
-        # Игнорируем старые запросы
-    except Exception as e:
-        cur.execute("ROLLBACK")
-        connect.close()
-        logger.error(f"Error buying hourly tickets: {e}")
-        try:
-            await call.answer(f"❌ Ошибка: {str(e)}", show_alert=True)
-        except:
-            pass
+        await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
 
-@router.callback_query(F.data == "view_weekly")
-async def cb_view_weekly(call: types.CallbackQuery):
-    await show_weekly(call)
+# ─────────────── пользовательские лотереи ───────────────
 
-async def show_weekly(event):
-    """Отображение состояния недельной лотереи."""
-    # Вычисляем время до конца недели (воскресенье 23:59:59)
-    now = datetime.datetime.now()
-    days_until_sunday = 6 - now.weekday()
-    end_of_week = (now + datetime.timedelta(days=days_until_sunday)).replace(hour=23, minute=59, second=59)
-    wait_time = end_of_week - now
-    days = wait_time.days
-    hours, remainder = divmod(wait_time.seconds, 3600)
-    minutes, _ = divmod(remainder, 60)
-
-    cursor.execute("SELECT draw_id, prize_pool FROM weekly_state ORDER BY draw_id DESC LIMIT 1")
-    res = cursor.fetchone()
-    if res:
-        draw_id, pool = res
-    else:
-        # Создаем, если нет
-        try:
-            now_ts = int(time.time())
-            cursor.execute("INSERT INTO weekly_state (draw_id, prize_pool, start_time) VALUES (1, 1000000, ?)", (now_ts,))
-            conn.commit()
-            draw_id, pool = 1, 1000000
-        except Exception as e:
-            logger.error(f"Error creating weekly_state: {e}")
-            draw_id, pool = 1, 1000000
-    
-    user_id = event.from_user.id
-    # Считаем билеты с начала недели (примерно)
-    start_of_week = int((now - datetime.timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0).timestamp())
-    cursor.execute("SELECT COUNT(*) FROM lottery_tickets WHERE user_id = ? AND lottery_type = 'weekly' AND buy_time > ?", (user_id, start_of_week))
-    my_tickets = cursor.fetchone()[0]
-
-    text = (
-        f"📅 <b>НЕДЕЛЬНАЯ ЛОТЕРЕЯ #{draw_id}</b>\n\n"
-        f"🔥 <b>СУПЕР ДЖЕКПОТ:</b> <code>{pool:,}</code> 💎\n\n"
-        f"⏳ До розыгрыша: <code>{days}д {hours}ч {minutes}м</code>\n"
-        f"🎫 Ваших билетов: <code>{my_tickets}/{WEEKLY_LIMIT}</code>\n\n"
-        f"<b>💝 КОМ БО СКИДКА:</b> Купи 3+ билета → скидка 15%!\n"
-        f"Цена: {WEEKLY_PRICE:,} 💎 (или {int(WEEKLY_PRICE * 3 * (1 - COMBO_DISCOUNT)):,} 💎 за 3 с комбо)"
-    )
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=f"🎫 КУПИТЬ 1 БИЛЕТ ({WEEKLY_PRICE})", callback_data="buy_weekly_ticket:1")
-    builder.button(text=f"🎫 КУПИТЬ 3 БИЛЕТА (скидка)", callback_data="buy_weekly_ticket:3")
-    builder.button(text="🔙 НАЗАД", callback_data="lottery_main")
-    
-    if isinstance(event, types.Message):
-        await event.answer(text, reply_markup=builder.adjust(1).as_markup(), parse_mode="HTML")
-    else:
-        await event.message.edit_text(text, reply_markup=builder.adjust(1).as_markup(), parse_mode="HTML")
-
-@router.callback_query(F.data.startswith("buy_weekly_ticket:"))
-async def buy_weekly_ticket_proc(call: types.CallbackQuery):
-    user_id = call.from_user.id
-    ticket_count = int(call.data.split(":")[1])
-    
-    connect = sqlite3.connect(DB_FILE, check_same_thread=False)
-    connect.execute("BEGIN IMMEDIATE")
-    cur = connect.cursor()
-    
-    try:
-        # Проверка баланса
-        cur.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-        user_row = cur.fetchone()
-        if not user_row:
-            connect.execute("ROLLBACK")
-            connect.close()
-            await call.answer("❌ Пользователь не найден!", show_alert=True)
-            return
-        
-        balance = user_row[0]
-        
-        # Расчет цены с комбо скидкой
-        if ticket_count >= 3:
-            final_price = int(WEEKLY_PRICE * ticket_count * (1 - COMBO_DISCOUNT))
-        else:
-            final_price = WEEKLY_PRICE * ticket_count
-        
-        if balance < final_price:
-            connect.execute("ROLLBACK")
-            connect.close()
-            await call.answer(f"❌ Недостаточно средств! Нужно {final_price:,} 💎", show_alert=True)
-            return
-        
-        # Проверка недельных лимитов
-        now = datetime.datetime.now()
-        start_of_week = int((now - datetime.timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0).timestamp())
-        cur.execute("SELECT COUNT(*) FROM lottery_tickets WHERE user_id = ? AND lottery_type = 'weekly' AND buy_time > ?", (user_id, start_of_week))
-        existing = cur.fetchone()[0]
-        if existing + ticket_count > WEEKLY_LIMIT:
-            connect.execute("ROLLBACK")
-            connect.close()
-            await call.answer(f"❌ Лимит: не более {WEEKLY_LIMIT} в неделю!", show_alert=True)
-            return
-        
-        # Обновляем баланс
-        cur.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (final_price, user_id))
-        
-        # Добавляем билеты
-        now_ts = int(time.time())
-        for _ in range(ticket_count):
-            cur.execute("INSERT INTO lottery_tickets (user_id, lottery_type, buy_time) VALUES (?, ?, ?)", 
-                       (user_id, 'weekly', now_ts))
-        
-        # Получаем текущий draw_id для обновления джекпота
-        cur.execute("SELECT draw_id FROM weekly_state ORDER BY draw_id DESC LIMIT 1")
-        draw_info = cur.fetchone()
-        draw_id = draw_info[0] if draw_info else 1
-        
-        # Обновляем джекпот (80% идет в банк)
-        cur.execute("UPDATE weekly_state SET prize_pool = prize_pool + ? WHERE draw_id = ?", 
-                   (int(final_price * 0.8), draw_id))
-        
-        connect.commit()
-        connect.close()
-        
-        discount_text = " 💝 СО СКИДКОЙ!" if ticket_count >= 3 else ""
-        await call.message.edit_text(
-            f"✅ Куплено {ticket_count} билет{'ов' if ticket_count != 1 else ''}{discount_text}\n\n"
-            f"💎 Потрачено: {final_price:,} 💎\n"
-            f"🍀 До розыгрыша в воскресенье!"
-        )
-        
-        await asyncio.sleep(2)
-        await show_weekly(call)
-        
-    except TelegramBadRequest as e:
-        cur.execute("ROLLBACK")
-        connect.close()
-        logger.warning(f"Callback timeout: {e}")
-    except Exception as e:
-        cur.execute("ROLLBACK")
-        connect.close()
-        logger.error(f"Error buying weekly tickets: {e}")
-        try:
-            await call.answer(f"❌ Ошибка: {str(e)}", show_alert=True)
-        except:
-            pass
-
-
-@router.callback_query(F.data == "view_mega")
-async def cb_view_mega(call: types.CallbackQuery):
-    await show_mega(call)
-
-async def show_mega(event):
-    """Отображение состояния мега-лотереи (НОВАЯ: высокие ставки)."""
-    now = datetime.datetime.now()
-    days_until_sunday = 6 - now.weekday()
-    end_of_week = (now + datetime.timedelta(days=days_until_sunday)).replace(hour=23, minute=59, second=59)
-    wait_time = end_of_week - now
-    days = wait_time.days
-    hours, remainder = divmod(wait_time.seconds, 3600)
-    minutes, _ = divmod(remainder, 60)
-
-    cursor.execute("SELECT draw_id, prize_pool FROM mega_state ORDER BY draw_id DESC LIMIT 1")
-    res = cursor.fetchone()
-    if res:
-        draw_id, pool = res
-    else:
-        # Создаем, если нет
-        try:
-            now_ts = int(time.time())
-            cursor.execute("INSERT INTO mega_state (draw_id, prize_pool, start_time) VALUES (1, 5000000, ?)", (now_ts,))
-            conn.commit()
-            draw_id, pool = 1, 5000000
-        except Exception as e:
-            logger.error(f"Error creating mega_state: {e}")
-            draw_id, pool = 1, 5000000
-    
-    user_id = event.from_user.id
-    start_of_week = int((now - datetime.timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0).timestamp())
-    cursor.execute("SELECT COUNT(*) FROM lottery_tickets WHERE user_id = ? AND lottery_type = 'mega' AND buy_time > ?", (user_id, start_of_week))
-    my_tickets = cursor.fetchone()[0]
-
-    text = (
-        f"🐳 <b>МЕГА-ЛОТЕРЕЯ #{draw_id}</b>\n\n"
-        f"💎 <b>ЛЕГЕНДАРНЫЙ ДЖЕКПОТ:</b> <code>{pool:,}</code> 💎\n\n"
-        f"⏳ До розыгрыша: <code>{days}д {hours}ч {minutes}м</code>\n"
-        f"🎫 Ваших билетов: <code>{my_tickets}/{MEGA_LIMIT}</code>\n\n"
-        f"<b>⚡ УСЛОВИЯ:</b>\n"
-        f"🔹 Стоимость: <b>{MEGA_PRICE:,} 💎</b> (только для хайроллеров)\n"
-        f"🔹 Лимит: {MEGA_LIMIT} билета в неделю\n"
-        f"🔹 Приз: ВЕСЬ ДЖЕКПОТ ОДНОМУ ЧЕЛОВЕКУ! 🎉\n\n"
-        f"<i>⭐ Чем больше участников - тем больше джекпот!</i>"
-    )
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=f"🎫 КУПИТЬ БИЛЕТ ({MEGA_PRICE:,})", callback_data="buy_mega_ticket")
-    builder.button(text="🔙 НАЗАД", callback_data="lottery_main")
-    
-    if isinstance(event, types.Message):
-        await event.answer(text, reply_markup=builder.adjust(1).as_markup(), parse_mode="HTML")
-    else:
-        await event.message.edit_text(text, reply_markup=builder.adjust(1).as_markup(), parse_mode="HTML")
-
-@router.callback_query(F.data == "buy_mega_ticket")
-async def buy_mega_ticket_proc(call: types.CallbackQuery):
-    user_id = call.from_user.id
-    user = db_get_user(user_id)
-    if not user:
-        return await call.answer("❌ Ошибка при загрузке профиля!", show_alert=True)
-    
-    now = datetime.datetime.now()
-    start_of_week = int((now - datetime.timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0).timestamp())
-    
-    cursor.execute("SELECT COUNT(*) FROM lottery_tickets WHERE user_id = ? AND lottery_type = 'mega' AND buy_time > ?", (user_id, start_of_week))
-    ticket_count_result = cursor.fetchone()
-    if ticket_count_result and ticket_count_result[0] >= MEGA_LIMIT:
-        return await call.answer(f"❌ Лимит: {MEGA_LIMIT} билета в неделю!", show_alert=True)
-    
-    if user[0] < MEGA_PRICE:
-        return await call.answer(f"❌ Недостаточно 💎! Нужно {MEGA_PRICE:,}", show_alert=True)
-
-    # Стандартная покупка (без комбо для мега)
-    db_update_stats(user_id, bet=MEGA_PRICE, win=0)
-    
-    now_ts = int(time.time())
-    cursor.execute("INSERT INTO lottery_tickets (user_id, lottery_type, buy_time) VALUES (?, 'mega', ?)", (user_id, now_ts))
-    
-    # 100% идет в джекпот
-    cursor.execute("UPDATE mega_state SET prize_pool = prize_pool + ? WHERE 1=1", (MEGA_PRICE,))
-    conn.commit()
-    
-    try:
-        await call.answer(f"✅ Билет в МЕГА-ЛОТЕРЕЮ куплен! Удачи! 🍀")
-    except TelegramBadRequest as e:
-        cursor.execute("ROLLBACK")
-        logger.warning(f"Callback timeout при покупке МЕГА билета: {e}")
-    
-    await show_mega(call)
-
-async def fast_pro(message: types.Message):
-    await show_pro(message)
-
-@router.callback_query(F.data == "view_pro")
-async def cb_pro(call: types.CallbackQuery):
-    await show_pro(call)
-
-async def show_pro(event):
-    day_ago = int(time.time()) - 86400
-    cursor.execute("SELECT COUNT(*) FROM lottery_tickets WHERE user_id = ? AND lottery_type = 'pro' AND buy_time > ?", (event.from_user.id, day_ago))
-    count = cursor.fetchone()[0]
-
-    text = (
-        f"💼 <b>ПРОФЕССИОНАЛЬНАЯ ЛОТЕРЕЯ</b>\n\n"
-        f"Это место для тех, кто не боится рисковать крупными суммами.\n\n"
-        f"🎫 Вход: <code>{PRO_PRICE:,}</code> 💎\n"
-        f"🏆 Макс. выигрыш: <code>2,000,000</code> 💎\n"
-        f"🚫 Ограничение: <code>{count}/{PRO_LIMIT}</code> билета в сутки."
-    )
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="💎 КУПИТЬ БИЛЕТ", callback_data="buy_pro_ticket")
-    builder.button(text="🔙 НАЗАД", callback_data="lottery_main")
-    
-    if isinstance(event, types.Message):
-        await event.answer(text, reply_markup=builder.adjust(1).as_markup(), parse_mode="HTML")
-    else:
-        await event.message.edit_text(text, reply_markup=builder.adjust(1).as_markup(), parse_mode="HTML")
-
-@router.callback_query(F.data == "buy_pro_ticket")
-async def buy_pro_ticket_proc(call: types.CallbackQuery):
-    user = db_get_user(call.from_user.id)
-    if not user:
-        return await call.answer("❌ Ошибка при загрузке профиля!", show_alert=True)
-        
-    day_ago = int(time.time()) - 86400
-    cursor.execute("SELECT COUNT(*) FROM lottery_tickets WHERE user_id = ? AND lottery_type = 'pro' AND buy_time > ?", (call.from_user.id, day_ago))
-    result = cursor.fetchone()
-    ticket_count = result[0] if result else 0
-    
-    if ticket_count >= PRO_LIMIT:
-        return await call.answer("❌ Приходите завтра! Лимит исчерпан.", show_alert=True)
-    if user[0] < PRO_PRICE:
-        return await call.answer("❌ Баланс слишком мал для Про-игр!", show_alert=True)
-
-    # Логика выигрыша для Про: 3% шанс на супер-приз
-    is_jackpot = random.random() < 0.03
-    win = 2000000 if is_jackpot else random.randint(40000, 250000)
-    
-    cursor.execute("INSERT INTO lottery_tickets (user_id, lottery_type, buy_time) VALUES (?, 'pro', ?)", (call.from_user.id, int(time.time())))
-    db_update_stats(call.from_user.id, bet=PRO_PRICE, win=win)
-    conn.commit()
-    
-    if is_jackpot:
-        header = "🚨 <b>НЕВЕРОЯТНЫЙ ДЖЕКПОТ!!!</b> 🚨"
-        emoji = "🎰"
-        footer = "Вы сорвали главный куш! Это история!"
-    else:
-        header = "🎉 <b>ПОЗДРАВЛЯЕМ С ПОБЕДОЙ!</b>"
-        emoji = "💰"
-        footer = "Средства успешно зачислены на ваш счет."
-
-    try:
-        await call.message.edit_text(
-            f"{header}\n\n"
-            f"{emoji} <b>Ваш выигрыш:</b> <code>{win:,}</code> 💎\n"
-            f"💎 <b>Баланс пополнен!</b>\n\n"
-            f"<i>{footer}</i>", 
-            reply_markup=InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="view_pro").as_markup(),
-            parse_mode="HTML"
-        )
-    except TelegramBadRequest as e:
-        logger.warning(f"Callback timeout при показе результата Про-лотереи: {e}")
-
-
-@router.message(Command("lotuser"))
-async def fast_user(message: types.Message):
-    await show_user_lots(message)
-
-@router.callback_query(F.data == "view_user_lotteries")
-async def cb_user_lots(call: types.CallbackQuery):
-    await show_user_lots(call)
-
-async def show_user_lots(event):
+@router.callback_query(F.data == "lot:user")
+async def lot_user_list(call: types.CallbackQuery):
+    await call.answer()
     cursor.execute(
-        "SELECT id, title, prize_pool, ticket_price, max_tickets, sold_tickets FROM user_lotteries "
-        "WHERE sold_tickets < max_tickets AND end_time > ?", (int(time.time()),)
+        "SELECT id, title, prize_pool, ticket_price, max_tickets, sold_tickets "
+        "FROM user_lotteries WHERE sold_tickets < max_tickets AND end_time > ?",
+        (int(time.time()),),
     )
-    lots = cursor.fetchall()
-    
-    builder = InlineKeyboardBuilder()
-    text = "🎪 <b>ЛОТЕРЕИ ОТ ПОЛЬЗОВАТЕЛЕЙ</b>\n\n"
-    
-    if not lots:
-        text += "На данный момент активных предложений нет.\nСтаньте первым и создайте свою лотерею!"
+    rows = cursor.fetchall()
+
+    kb = InlineKeyboardBuilder()
+    if not rows:
+        text = "🎪 <b>Пользовательские лотереи</b>\n\nСейчас нет активных розыгрышей. Создай свой!"
     else:
-        for lot in lots:
-            text += f"▪️ <b>{lot[1]}</b>\n   💰 Приз: <code>{lot[2]:,}</code> | 🎫 Цена: <code>{lot[3]:,}</code>\n   🎟 Остаток: <code>{lot[4]-lot[5]}/{lot[4]}</code>\n\n"
-            builder.button(text=f"🎫 {lot[1]}", callback_data=f"buy_ulot:{lot[0]}")
-    
-    builder.button(text="➕ Создать лотерею", callback_data="create_user_lottery")
-    builder.button(text="🔙 Назад в меню", callback_data="lottery_main")
-    builder.adjust(1)
-    
-    if isinstance(event, types.Message):
-        await event.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
-    else:
-        await event.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+        lines = ["🎪 <b>Пользовательские лотереи</b>\n"]
+        for lid, title, prize, price, mx, sold in rows:
+            lines.append(
+                f"▪️ <b>{title}</b>\n"
+                f"   💰 Приз: <code>{prize:,}</code> · 🎫 Цена: <code>{price:,}</code>\n"
+                f"   🎟 Остаток: <code>{mx - sold}/{mx}</code>"
+            )
+            kb.button(text=f"🎫 {title}", callback_data=f"lot:ubuy:{lid}")
+        text = "\n\n".join(lines)
+
+    kb.button(text="➕ Создать", callback_data="lot:ucreate")
+    kb.button(text="⬅️ Назад", callback_data="lot:main")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
 
-@router.callback_query(F.data == "create_user_lottery")
-async def start_creation(call: types.CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "lot:ucreate")
+async def lot_ucreate(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
     user = db_get_user(call.from_user.id)
-    # Ограничение по опыту (количеству игр)
-    if user[5] < 10:
-        return await call.answer("❌ Вам нужно сыграть минимум 10 игр в казино!", show_alert=True)
-    
-    await state.update_data(msg_id=call.message.message_id)
+    if not user or user[5] < 10:
+        return await call.answer("❌ Нужно сыграть минимум 10 игр.", show_alert=True)
     await state.set_state(CreateLottery.title)
-    await call.message.edit_text(
-        "🎪 <b>СОЗДАНИЕ ЛОТЕРЕИ (1/4)</b>\n\nВведите яркое название для вашего розыгрыша:", 
-        parse_mode="HTML"
-    )
+    await state.update_data(msg_id=call.message.message_id)
+    try:
+        await call.message.edit_text(
+            "🎪 <b>Создание лотереи (1/4)</b>\n\nПридумай название (до 30 символов):",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
 
 @router.message(CreateLottery.title)
-async def process_title(message: types.Message, state: FSMContext):
+async def lot_ucreate_title(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    title_fixed = message.text[:30]
-    await state.update_data(title=title_fixed)
+    title = (message.text or "").strip()[:30]
+    if not title:
+        return await message.answer("❌ Пустое название.")
+    await state.update_data(title=title)
     await state.set_state(CreateLottery.prize_pool)
-    
-    try: await message.delete()
-    except: pass
-    
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await message.bot.edit_message_text(
-        chat_id=message.chat.id, 
-        message_id=data['msg_id'], 
-        text=f"🎪 <b>ШАГ 2/4 (Название: {title_fixed})</b>\n\nКакая сумма будет разыграна? (минимум 10,000 💎):",
-        parse_mode="HTML"
+        chat_id=message.chat.id,
+        message_id=data["msg_id"],
+        text=f"🎪 <b>Шаг 2/4</b> — «{title}»\n\nКакой призовой фонд? (минимум 10 000 💎)",
+        parse_mode="HTML",
     )
+
 
 @router.message(CreateLottery.prize_pool)
-async def process_pool(message: types.Message, state: FSMContext):
+async def lot_ucreate_pool(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    if not message.text.isdigit():
-        return await message.answer("❌ Введите число!")
-    
+    if not (message.text or "").isdigit():
+        return await message.answer("❌ Нужно число.")
     val = int(message.text)
-    if val < 10000:
-        return await message.answer("❌ Минимальный приз 10,000!")
-        
+    if val < 10_000:
+        return await message.answer("❌ Минимум 10 000 💎.")
     await state.update_data(prize_pool=val)
     await state.set_state(CreateLottery.ticket_price)
-    
-    try: await message.delete()
-    except: pass
-    
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await message.bot.edit_message_text(
-        chat_id=message.chat.id, 
-        message_id=data['msg_id'], 
-        text=f"🎪 <b>ШАГ 3/4 (Приз: {val:,})</b>\n\nСколько будет стоить один билет?",
-        parse_mode="HTML"
+        chat_id=message.chat.id,
+        message_id=data["msg_id"],
+        text=f"🎪 <b>Шаг 3/4</b> — приз {val:,} 💎\n\nЦена одного билета?",
+        parse_mode="HTML",
     )
+
 
 @router.message(CreateLottery.ticket_price)
-async def process_price(message: types.Message, state: FSMContext):
+async def lot_ucreate_price(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    if not message.text.isdigit():
-        return await message.answer("❌ Введите число!")
-    
+    if not (message.text or "").isdigit():
+        return await message.answer("❌ Нужно число.")
     price = int(message.text)
-    if price <= 0: return
-    
+    if price < 100:
+        return await message.answer("❌ Цена билета минимум 100 💎.")
     await state.update_data(ticket_price=price)
     await state.set_state(CreateLottery.max_tickets)
-    
-    try: await message.delete()
-    except: pass
-    
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await message.bot.edit_message_text(
-        chat_id=message.chat.id, 
-        message_id=data['msg_id'], 
-        text=f"🎪 <b>ШАГ 4/4 (Цена: {price:,})</b>\n\nКакое общее количество билетов выпустить?",
-        parse_mode="HTML"
+        chat_id=message.chat.id,
+        message_id=data["msg_id"],
+        text=f"🎪 <b>Шаг 4/4</b> — цена {price:,} 💎\n\nСколько всего билетов?",
+        parse_mode="HTML",
     )
+
 
 @router.message(CreateLottery.max_tickets)
-async def process_max_tickets(message: types.Message, state: FSMContext):
+async def lot_ucreate_max(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    if not message.text.isdigit(): return
-    
+    if not (message.text or "").isdigit():
+        return await message.answer("❌ Нужно число.")
     count = int(message.text)
-    fee = int(data['prize_pool'] * SYSTEM_FEE)
-    total = data['prize_pool'] + fee
-    
+    if count < 2:
+        return await message.answer("❌ Минимум 2 билета.")
+    fee = int(data["prize_pool"] * 0.05)
+    total = data["prize_pool"] + fee
     await state.update_data(max_tickets=count, total_cost=total)
     await state.set_state(CreateLottery.confirm)
-    
-    summary = (
-        f"📝 <b>ПРОВЕРКА ВАШЕЙ ЛОТЕРЕИ</b>\n\n"
-        f"🏷 Название: <code>{data['title']}</code>\n"
-        f"💰 Выигрыш: <code>{data['prize_pool']:,} 💎</code>\n"
-        f"🎫 Цена билета: <code>{data['ticket_price']:,} 💎</code>\n"
-        f"🎟 Всего билетов: <code>{count} шт.</code>\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"💵 Итого к оплате: <b>{total:,} 💎</b>\n"
-        f"<i>(Приз + комиссия 5%)</i>"
-    )
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ ПОДТВЕРДИТЬ И ОПЛАТИТЬ", callback_data="confirm_ulot")
-    builder.button(text="❌ ОТМЕНА", callback_data="lottery_main")
-    
-    try: await message.delete()
-    except: pass
-    
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Подтвердить", callback_data="lot:ucreate_ok")
+    kb.button(text="❌ Отмена", callback_data="lot:main")
+    kb.adjust(1)
     await message.bot.edit_message_text(
-        chat_id=message.chat.id, 
-        message_id=data['msg_id'], 
-        text=summary, 
-        reply_markup=builder.adjust(1).as_markup(),
-        parse_mode="HTML"
+        chat_id=message.chat.id,
+        message_id=data["msg_id"],
+        text=(
+            f"🎪 <b>Проверь лотерею</b>\n\n"
+            f"🏷 Название: <code>{data['title']}</code>\n"
+            f"💰 Приз: <code>{data['prize_pool']:,}</code> 💎\n"
+            f"🎫 Цена билета: <code>{data['ticket_price']:,}</code> 💎\n"
+            f"🎟 Всего билетов: <code>{count}</code>\n\n"
+            f"К списанию (приз + 5% комиссии): <b>{total:,}</b> 💎"
+        ),
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML",
     )
 
-@router.callback_query(F.data == "confirm_ulot")
-async def finalize_ulot(call: types.CallbackQuery, state: FSMContext):
+
+@router.callback_query(F.data == "lot:ucreate_ok")
+async def lot_ucreate_confirm(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user = db_get_user(call.from_user.id)
-    
-    if user[0] < data['total_cost']:
-        return await call.answer("❌ Ошибка оплаты: недостаточно средств!", show_alert=True)
-    
-    # Списание средств
-    db_update_stats(call.from_user.id, bet=data['total_cost'], win=0)
-    
-    # Запись в БД
-    cursor.execute(
-        "INSERT INTO user_lotteries (creator_id, title, prize_pool, ticket_price, max_tickets, end_time, sold_tickets) "
-        "VALUES (?, ?, ?, ?, ?, ?, 0)",
-        (call.from_user.id, data['title'], data['prize_pool'], data['ticket_price'], data['max_tickets'], int(time.time()) + 86400)
-    )
-    conn.commit()
-    
-    await state.clear()
-    await call.message.edit_text(
-        f"🎉 <b>ЛОТЕРЕЯ ЗАПУЩЕНА!</b>\n\nВаш розыгрыш «{data['title']}» активирован. Как только все билеты будут раскуплены, победитель определится автоматически!",
-        reply_markup=InlineKeyboardBuilder().button(text="🏠 В лотерейный центр", callback_data="lottery_main").as_markup(),
-        parse_mode="HTML"
-    )
+    total = data.get("total_cost", 0)
+    if not user or user[0] < total:
+        return await call.answer("❌ Недостаточно средств.", show_alert=True)
 
-
-@router.callback_query(F.data.startswith("buy_ulot:"))
-async def process_buy_user_ticket(call: types.CallbackQuery):
-    lot_id = int(call.data.split(":")[1])
-    user_id = call.from_user.id
-    
-    cursor.execute("SELECT title, prize_pool, ticket_price, max_tickets, sold_tickets FROM user_lotteries WHERE id = ?", (lot_id,))
-    lot = cursor.fetchone()
-    if not lot: return await call.answer("❌ Лотерея завершена.", show_alert=True)
-    
-    title, prize, price, max_t, sold = lot
-    if sold >= max_t: return await call.answer("❌ Билетов нет!", show_alert=True)
-        
-    user = db_get_user(user_id)
-    if user[0] < price: return await call.answer(f"❌ Нужно {price:,} 💎", show_alert=True)
-        
-    cursor.execute("SELECT gold_ticket FROM users WHERE id = ?", (user_id,))
-    has_gold = cursor.fetchone()[0]
-    entries = 3 if has_gold > 0 else 1 # В БД будет 3 записи этого юзера
-
-    db_update_stats(user_id, bet=price, win=0)
-    
-    # Засчитываем только 1 билет в общий счетчик (чтобы лотерея не закрылась слишком быстро)
-    new_sold = sold + 1
-    cursor.execute("UPDATE user_lotteries SET sold_tickets = ? WHERE id = ?", (new_sold, lot_id))
-    
-    # Но в таблицу участников записываем 3 раза для повышения шанса
-    now = int(time.time())
-    for _ in range(entries):
-        cursor.execute("INSERT INTO lottery_tickets (user_id, lottery_type, buy_time) VALUES (?, ?, ?)", 
-                       (user_id, f"user_lot_{lot_id}", now))
-    
-    # Списываем золотой билет если он был использован
-    if has_gold > 0:
-        cursor.execute("UPDATE users SET gold_ticket = gold_ticket - 1 WHERE id = ?", (user_id,))
-        
-    conn.commit()
-    
-    bonus_text = " 🔥 Шанс x3!" if has_gold else ""
-    await call.answer(f"✅ Билет куплен!{bonus_text}")
-    
-    # Если это последний билет — выбираем победителя сразу
-    if new_sold >= max_t:
-        await finish_user_lottery(lot_id, call.message)
-    else:
-        # Обновляем список лотерей, чтобы цифры изменились
-        await show_user_lots(call)
-
-async def finish_user_lottery(lot_id, message):
-    """Функция рандома и выплаты приза."""
     try:
-        cursor.execute("SELECT title, prize_pool, creator_id FROM user_lotteries WHERE id = ?", (lot_id,))
-        lot_data = cursor.fetchone()
-        if not lot_data:
-            logger.warning(f"Lottery {lot_id} not found in database")
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            "UPDATE users SET balance = balance - ? WHERE id = ? AND balance >= ?",
+            (total, call.from_user.id, total),
+        )
+        if cursor.rowcount == 0:
+            cursor.execute("ROLLBACK")
+            return await call.answer("❌ Не хватило баланса.", show_alert=True)
+        cursor.execute(
+            "INSERT INTO user_lotteries (creator_id, title, prize_pool, ticket_price, max_tickets, end_time, sold_tickets) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0)",
+            (
+                call.from_user.id,
+                data["title"],
+                data["prize_pool"],
+                data["ticket_price"],
+                data["max_tickets"],
+                int(time.time()) + 86400,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("lot:ucreate: ошибка")
+        return await call.answer("❌ Ошибка при создании.", show_alert=True)
+
+    await state.clear()
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎪 Пользовательские", callback_data="lot:user")
+    kb.button(text="⬅️ В лотереи", callback_data="lot:main")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(
+            f"✅ Лотерея «{data['title']}» запущена. Игроки её увидят в списке.",
+            reply_markup=kb.as_markup(),
+        )
+    except Exception:
+        await call.message.answer("✅ Лотерея запущена.", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("lot:ubuy:"))
+async def lot_ubuy(call: types.CallbackQuery):
+    lid = int(call.data.split(":")[2])
+    cursor.execute(
+        "SELECT title, prize_pool, ticket_price, max_tickets, sold_tickets FROM user_lotteries WHERE id = ?",
+        (lid,),
+    )
+    lot = cursor.fetchone()
+    if not lot:
+        return await call.answer("❌ Лотерея уже закрыта.", show_alert=True)
+    title, prize, price, mx, sold = lot
+    if sold >= mx:
+        return await call.answer("❌ Все билеты проданы.", show_alert=True)
+
+    user_id = call.from_user.id
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            "UPDATE users SET balance = balance - ? WHERE id = ? AND balance >= ?",
+            (price, user_id, price),
+        )
+        if cursor.rowcount == 0:
+            cursor.execute("ROLLBACK")
+            return await call.answer(f"❌ Нужно {price:,} 💎.", show_alert=True)
+        cursor.execute(
+            "INSERT INTO user_lottery_tickets (lottery_id, user_id) VALUES (?, ?)",
+            (lid, user_id),
+        )
+        cursor.execute(
+            "UPDATE user_lotteries SET sold_tickets = sold_tickets + 1 WHERE id = ?",
+            (lid,),
+        )
+        conn.commit()
+    except Exception:
+        cursor.execute("ROLLBACK")
+        logger.exception("lot:ubuy")
+        return await call.answer("❌ Ошибка покупки.", show_alert=True)
+
+    await call.answer(f"✅ Билет в «{title}» куплен.")
+
+    cursor.execute("SELECT sold_tickets, max_tickets FROM user_lotteries WHERE id = ?", (lid,))
+    sold_after, max_after = cursor.fetchone()
+    if sold_after >= max_after:
+        await finish_user_lottery(lid, call.message)
+    else:
+        await lot_user_list(call)
+
+
+async def finish_user_lottery(lid: int, message: types.Message) -> None:
+    try:
+        cursor.execute("SELECT title, prize_pool, creator_id FROM user_lotteries WHERE id = ?", (lid,))
+        data = cursor.fetchone()
+        if not data:
+            return
+        title, prize, creator_id = data
+
+        cursor.execute("SELECT user_id FROM user_lottery_tickets WHERE lottery_id = ?", (lid,))
+        players = [r[0] for r in cursor.fetchall()]
+        if not players:
+            return
+        winner_id = random.choice(players)
+
+        cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (prize, winner_id))
+        cursor.execute("DELETE FROM user_lotteries WHERE id = ?", (lid,))
+        cursor.execute("DELETE FROM user_lottery_tickets WHERE lottery_id = ?", (lid,))
+        conn.commit()
+
+        text = (
+            f"🎊 <b>«{title}» — итог</b>\n\n"
+            f"Победитель: <code>{winner_id}</code>\n"
+            f"Приз: <b>{prize:,}</b> 💎"
+        )
+        try:
+            await message.answer(text, parse_mode="HTML")
+        except Exception:
+            pass
+        for uid in set(players + [creator_id]):
+            try:
+                await message.bot.send_message(uid, text, parse_mode="HTML")
+            except Exception:
+                pass
+    except Exception:
+        logger.exception("finish_user_lottery")
+
+
+# ─────────────── проведение розыгрышей (фоновые функции) ───────────────
+
+async def run_draw(cfg, bot, notify_fn=None) -> None:
+    """Проводит розыгрыш: определяет выигрышные номера, сверяет билеты, закрывает тираж."""
+    try:
+        draw_id, pool = current_draw(cfg)
+
+        cursor.execute(
+            "SELECT id, user_id, numbers FROM lottery_tickets "
+            "WHERE lottery_type = ? AND draw_id = ? AND status = 'active'",
+            (cfg["key"], draw_id),
+        )
+        tickets = cursor.fetchall()
+
+        winning_numbers = pick_numbers(cfg["numbers_count"], cfg["numbers_pool"])
+        winning_set = set(winning_numbers)
+        now = int(time.time())
+
+        if not tickets:
+            cursor.execute(
+                f"UPDATE {cfg['state']} SET winning_numbers = ?, drawn_at = ? WHERE draw_id = ?",
+                (",".join(str(n) for n in winning_numbers), now, draw_id),
+            )
+            cursor.execute(f"INSERT INTO {cfg['state']} (prize_pool) VALUES (?)", (pool,))
+            conn.commit()
             return
 
-        # Достаем всех участников этой конкретной лотереи
-        cursor.execute("SELECT user_id FROM lottery_tickets WHERE lottery_type = ?", (f"user_lot_{lot_id}",))
-        rows = cursor.fetchall()
-        
-        if rows:
-            participants = [r[0] for r in rows]
-            winner_id = random.choice(participants) # Случайный выбор из списка
-            
-            # Выдаем выигрыш
-            db_update_stats(winner_id, bet=0, win=lot_data[1])
-            
-            # Красивое сообщение о победе
-            text = (
-                f"🎊 <b>ЛОТЕРЕЯ ЗАВЕРШЕНА!</b>\n\n"
-                f"В розыгрыше «{lot_data[0]}» все билеты проданы!\n"
-                f"🏆 Победитель: <code>{winner_id}</code>\n"
-                f"💰 Приз <b>{lot_data[1]:,} 💎</b> зачислен на баланс!"
-            )
-            try:
-                await message.answer(text, parse_mode="HTML")
-            except TelegramBadRequest as e:
-                logger.error(f"Error sending lottery finish message: {e}")
-                
-            # Уведомляем создателя лотереи
-            try:
-                await message.bot.send_message(
-                    lot_data[2],
-                    f"✅ Ваша лотерея '{lot_data[0]}' завершена! Выплачено {lot_data[1]:,} 💎"
-                )
-            except Exception as e:
-                logger.error(f"Error notifying lottery creator {lot_data[2]}: {e}")
-        else:
-            logger.warning(f"No participants found for lottery {lot_id}")
+        winners_by_tier = {m: [] for m in cfg["prizes"].keys()}
+        for tid, uid, nums_str in tickets:
+            t_nums = set(int(x) for x in nums_str.split(","))
+            matches = len(t_nums & winning_set)
+            if matches in winners_by_tier:
+                winners_by_tier[matches].append((tid, uid))
 
-        # Удаляем лотерею и билеты, чтобы не занимать место в БД
-        cursor.execute("DELETE FROM user_lotteries WHERE id = ?", (lot_id,))
-        cursor.execute("DELETE FROM lottery_tickets WHERE lottery_type = ?", (f"user_lot_{lot_id}",))
+        jackpot_tier = max(k for k, v in cfg["prizes"].items() if v == "jackpot")
+        payouts = {}
+        jackpot_winners = winners_by_tier.get(jackpot_tier, [])
+        if jackpot_winners:
+            each = pool // len(jackpot_winners)
+            for tid, uid in jackpot_winners:
+                payouts[tid] = (uid, each)
+
+        for matches, entries in winners_by_tier.items():
+            if matches == jackpot_tier or not entries:
+                continue
+            mult = cfg["prizes"][matches]
+            win_amount = cfg["price"] * int(mult)
+            for tid, uid in entries:
+                payouts[tid] = (uid, win_amount)
+
+        for tid, uid, _ in tickets:
+            if tid in payouts:
+                _, win_amount = payouts[tid]
+                cursor.execute(
+                    "UPDATE users SET balance = balance + ? WHERE id = ?",
+                    (win_amount, uid),
+                )
+                cursor.execute(
+                    "UPDATE lottery_tickets SET status = 'archived', win = ? WHERE id = ?",
+                    (win_amount, tid),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE lottery_tickets SET status = 'archived', win = 0 WHERE id = ?",
+                    (tid,),
+                )
+
+        cursor.execute(
+            f"UPDATE {cfg['state']} SET winning_numbers = ?, drawn_at = ? WHERE draw_id = ?",
+            (",".join(str(n) for n in winning_numbers), now, draw_id),
+        )
+        defaults = {"hourly": 100_000, "weekly": 1_000_000, "mega": 5_000_000}
+        next_pool = defaults[cfg["key"]]
+        if not jackpot_winners:
+            next_pool += pool
+        cursor.execute(f"INSERT INTO {cfg['state']} (prize_pool) VALUES (?)", (next_pool,))
         conn.commit()
-    except Exception as e:
-        logger.error(f"Error finishing lottery {lot_id}: {e}")
+
+        unique_users = {uid for _, uid, _ in tickets}
+        summary = (
+            f"{cfg['title']} — тираж #{draw_id}\n"
+            f"Выигрышные номера: {format_numbers(winning_numbers)}\n"
+            f"Банк: <b>{pool:,}</b> 💎, призы разыграны."
+        )
+        for uid in unique_users:
+            try:
+                await bot.send_message(uid, summary, parse_mode="HTML")
+            except (TelegramBadRequest, Exception):
+                pass
+    except Exception:
+        logger.exception("lottery run_draw(%s)", cfg["key"])
+
+
+async def hourly_loop(bot) -> None:
+    while True:
+        try:
+            now = datetime.datetime.now()
+            nxt = (now + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+            await asyncio.sleep(max(1, (nxt - datetime.datetime.now()).total_seconds()))
+            await run_draw(HOURLY, bot)
+        except Exception:
+            logger.exception("hourly_loop")
+            await asyncio.sleep(60)
+
+
+async def weekly_loop(bot) -> None:
+    while True:
+        try:
+            now = datetime.datetime.now()
+            days_ahead = 6 - now.weekday()
+            end = (now + datetime.timedelta(days=days_ahead)).replace(hour=23, minute=59, second=30, microsecond=0)
+            await asyncio.sleep(max(1, (end - datetime.datetime.now()).total_seconds()))
+            await run_draw(WEEKLY, bot)
+            await run_draw(MEGA, bot)
+            await asyncio.sleep(120)
+        except Exception:
+            logger.exception("weekly_loop")
+            await asyncio.sleep(600)

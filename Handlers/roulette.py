@@ -279,6 +279,8 @@ async def rl_spin(call: types.CallbackQuery, state: FSMContext):
     spin_msg = await call.message.answer("🎡 Крутится барабан…")
     await asyncio.sleep(1.4)
 
+    balance_after_stake = db_get_user(user_id)[0]
+
     n = random.randint(0, 36)
     total_win = 0
     report_lines = []
@@ -287,22 +289,28 @@ async def rl_spin(call: types.CallbackQuery, state: FSMContext):
         win = base_stake * mult
         total_win += win
         marker = "✅" if mult > 0 else "❌"
+        diff = win - base_stake
         report_lines.append(
             f"{marker} {bet_label(b['type'], b['value'])}: "
-            f"{'+' if win - base_stake >= 0 else ''}{win - base_stake:,} 💎"
+            f"{'+' if diff >= 0 else ''}{diff:,} 💎"
         )
 
     db_update_stats(user_id, total_stake, total_win, deducted=True)
-
     new_balance = db_get_user(user_id)[0]
-    delta = total_win - total_stake
+
+    credited = new_balance - balance_after_stake
+    delta = credited - total_stake
     header = "🎉 <b>ПОБЕДА</b>" if delta > 0 else ("➖ <b>Ноль</b>" if delta == 0 else "❌ <b>Проигрыш</b>")
+    bonus_note = ""
+    if credited != total_win:
+        bonus_note = f"\n<i>(с учётом буста/кэшбэка/страховки зачислено: {credited:,} 💎)</i>"
 
     text = (
         f"{header}\n"
         f"Выпало: <b>{describe_number(n)}</b>\n\n"
         + "\n".join(report_lines)
-        + f"\n\nИтого: {'+' if delta >= 0 else ''}{delta:,} 💎"
+        + f"\n\nИтог: {'+' if delta >= 0 else ''}{delta:,} 💎"
+        + bonus_note
         + f"\n💳 Баланс: {new_balance:,} 💎"
     )
 
