@@ -50,7 +50,6 @@ from database import (  # noqa: E402
 )
 from Handlers import (  # noqa: E402
     admin,
-    battlepass,
     clans,
     common,
     crash,
@@ -63,6 +62,7 @@ from Handlers import (  # noqa: E402
     monetka,
     pvp,
     qtop,
+    referrals,
     roulette,
     sunduk,
     wheel,
@@ -103,7 +103,7 @@ ROUTERS = [
     wheel.router,
     events.router,
     clans.router,
-    battlepass.router,
+    referrals.router,
 ]
 
 

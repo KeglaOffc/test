@@ -438,14 +438,7 @@ def db_update_stats(user_id: int, bet: int = 0, win: int = 0, deducted: bool = F
     
     conn.commit()
 
-    # XP для боевого пропуска: 10 XP за ставку + 1 XP за каждые 1k 💎 в ставке
     if bet > 0:
-        try:
-            from Handlers.battlepass import add_xp as _bp_xp  # lazy
-            _bp_xp(user_id, 10 + bet // 1000)
-        except Exception:
-            pass
-        # XP клана из ивента
         try:
             from Handlers.clans import add_clan_xp as _clan_xp
             from Handlers.events import active_events as _ae
@@ -454,6 +447,11 @@ def db_update_stats(user_id: int, bet: int = 0, win: int = 0, deducted: bool = F
                 if ev["kind"] == "clan_xp_mult":
                     mult = max(mult, float(ev.get("value") or 1.0))
             _clan_xp(user_id, int((5 + bet // 1000) * mult))
+        except Exception:
+            pass
+        try:
+            from Handlers.referrals import on_activity as _ref_activity
+            _ref_activity(user_id, bet, final_win)
         except Exception:
             pass
 
