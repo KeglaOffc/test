@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
-from database import db_get_user, db_update_stats
+from database import db_get_user, db_update_stats, db_get_rig
 from Handlers.common import check_user
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,13 @@ async def run_crash_game(message: Message, state: FSMContext):
     db_update_stats(user_id, bet=bet)
 
     multiplier = 1.0
-    crash_point = random.uniform(1.0, 10.0)
+    rig = db_get_rig(user_id)
+    if rig == "win":
+        crash_point = random.uniform(8.0, 15.0)
+    elif rig == "lose":
+        crash_point = random.uniform(1.0, 1.3)
+    else:
+        crash_point = random.uniform(1.0, 10.0)
     game_id = f"{user_id}_{int(asyncio.get_event_loop().time())}"
     
     active_games[game_id] = {

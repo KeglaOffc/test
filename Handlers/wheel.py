@@ -25,6 +25,12 @@ SECTORS = [
 DAY = 24 * 60 * 60
 EXTRA_SPIN_PRICE = 5_000
 
+VIP_WHEEL_CD = {"bronze": 20 * 3600, "silver": 12 * 3600, "gold": 6 * 3600}
+
+
+def _wheel_cooldown(privilege: str) -> int:
+    return VIP_WHEEL_CD.get(privilege or "none", DAY)
+
 
 def _ensure_column():
     try:
@@ -42,13 +48,15 @@ def spin_once() -> dict:
     return random.choices(SECTORS, weights=weights, k=1)[0]
 
 
-def wheel_menu_text(free_available: bool, seconds_left: int) -> str:
+def wheel_menu_text(free_available: bool, seconds_left: int, privilege: str = "none") -> str:
     if free_available:
         status = "🎁 Бесплатный спин доступен прямо сейчас."
     else:
         h = seconds_left // 3600
         m = (seconds_left % 3600) // 60
         status = f"⌛️ Следующий бесплатный спин через <b>{h} ч {m} мин</b>."
+    if privilege in ("bronze", "silver", "gold"):
+        status += f"\n👑 VIP {privilege} — ускоренный КД."
     sectors = "\n".join(
         f"• {s['emoji']} {s['label']} — {s['amount']:,} 💎 (шанс {s['weight']}%)"
         for s in SECTORS
@@ -75,14 +83,19 @@ async def wheel_entry(message: types.Message):
     if u[2] == 1:
         return await message.reply("🚫 Вы заблокированы.")
 
-    cursor.execute("SELECT COALESCE(last_wheel, 0) FROM users WHERE id = ?", (message.from_user.id,))
-    last = (cursor.fetchone() or [0])[0]
+    cursor.execute(
+        "SELECT COALESCE(last_wheel, 0), COALESCE(privilege, 'none') FROM users WHERE id = ?",
+        (message.from_user.id,),
+    )
+    row = cursor.fetchone() or (0, "none")
+    last, privilege = row[0], row[1]
+    cd = _wheel_cooldown(privilege)
     now = int(time.time())
-    free_available = now - last >= DAY
-    seconds_left = max(0, DAY - (now - last))
+    free_available = now - last >= cd
+    seconds_left = max(0, cd - (now - last))
 
     await message.answer(
-        wheel_menu_text(free_available, seconds_left),
+        wheel_menu_text(free_available, seconds_left, privilege),
         reply_markup=wheel_menu_kb(free_available).as_markup(),
         parse_mode="HTML",
     )
@@ -97,17 +110,19 @@ async def wheel_spin(call: types.CallbackQuery):
     try:
         cursor.execute("BEGIN IMMEDIATE")
         cursor.execute(
-            "SELECT balance, COALESCE(last_wheel, 0) FROM users WHERE id = ?", (user_id,)
+            "SELECT balance, COALESCE(last_wheel, 0), COALESCE(privilege, 'none') FROM users WHERE id = ?",
+            (user_id,),
         )
         row = cursor.fetchone()
         if not row:
             cursor.execute("ROLLBACK")
             return await call.message.answer("❌ Пользователь не найден.")
-        balance, last = row
+        balance, last, privilege = row
+        cd = _wheel_cooldown(privilege)
         now = int(time.time())
 
         if kind == "free":
-            if now - last < DAY:
+            if now - last < cd:
                 cursor.execute("ROLLBACK")
                 return await call.message.answer("❌ Бесплатный спин пока недоступен.")
             cursor.execute("UPDATE users SET last_wheel = ? WHERE id = ?", (now, user_id))

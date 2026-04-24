@@ -168,6 +168,23 @@ def init_tables() -> None:
         )
         ''')
 
+        # Рынок предметов майнинга
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mining_market (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            seller_id INTEGER,
+            item_id INTEGER,
+            name TEXT,
+            hs REAL,
+            watt INTEGER,
+            wear REAL,
+            price INTEGER,
+            status TEXT DEFAULT 'open',
+            buyer_id INTEGER,
+            created_at INTEGER
+        )
+        ''')
+
         # Таблица настроек бота (для тех. работ)
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS bot_settings (
@@ -222,6 +239,7 @@ def apply_migrations() -> None:
         ("users", "privilege", "TEXT DEFAULT 'none'"),
         ("users", "last_wheel", "INTEGER DEFAULT 0"),
         ("users", "scratch_pack", "INTEGER DEFAULT 0"),
+        ("users", "rig_force", "TEXT DEFAULT 'off'"),
     ]
 
     for table, column, definition in migrations:
@@ -329,9 +347,17 @@ def db_update_stats(user_id: int, bet: int = 0, win: int = 0, deducted: bool = F
     boost_end = user_data[7]
     has_cashback = user_data[11] if len(user_data) > 11 else 0
     bet_insure = user_data[12] if len(user_data) > 12 else 0
-    
+
+    # Привилегия (может отсутствовать у старых пользователей — ленивый запрос)
+    try:
+        cursor.execute("SELECT privilege FROM users WHERE id = ?", (user_id,))
+        priv_row = cursor.fetchone()
+        privilege = (priv_row[0] if priv_row else "none") or "none"
+    except Exception:
+        privilege = "none"
+
     final_win = win
-    
+
     # Буст x2
     try:
         if isinstance(boost_end, (int, float)) and boost_end > time.time():
@@ -339,9 +365,15 @@ def db_update_stats(user_id: int, bet: int = 0, win: int = 0, deducted: bool = F
     except (TypeError, ValueError):
         pass
 
-    # Кэшбэк 5%
+    # Кэшбэк 5% (от клевера / буста из магазина)
     if has_cashback and bet > 0:
         final_win += int(bet * 0.05)
+
+    # VIP-кэшбэк с проигрышей: bronze 2%, silver 5%, gold 10%
+    if win == 0 and bet > 0:
+        vip_cashback = {"bronze": 0.02, "silver": 0.05, "gold": 0.10}.get(privilege, 0)
+        if vip_cashback:
+            final_win += int(bet * vip_cashback)
 
     # Страховка ставки: при проигрыше возвращает 50%
     if win == 0 and bet > 0 and bet_insure > 0:
@@ -386,6 +418,33 @@ def db_update_stats(user_id: int, bet: int = 0, win: int = 0, deducted: bool = F
     
     conn.commit()
     return new_balance
+
+
+def db_get_rig(user_id: int) -> str:
+    """Возвращает текущую подкрутку игрока: 'off' / 'win' / 'lose'."""
+    try:
+        cursor.execute("SELECT rig_force FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            return "off"
+        val = (row[0] or "off").strip().lower()
+        return val if val in ("win", "lose") else "off"
+    except Exception:
+        return "off"
+
+
+def db_set_rig(user_id: int, mode: str) -> bool:
+    """Устанавливает подкрутку для игрока. Принимает 'off'/'win'/'lose'."""
+    mode = (mode or "off").strip().lower()
+    if mode not in ("off", "win", "lose"):
+        return False
+    try:
+        cursor.execute("UPDATE users SET rig_force = ? WHERE id = ?", (mode, user_id))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception:
+        logger.exception("db_set_rig")
+        return False
 
 
 def db_get_global_stats() -> Tuple[int, Optional[int]]:

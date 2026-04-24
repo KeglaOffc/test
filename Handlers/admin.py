@@ -1,7 +1,6 @@
 """Админ-панель казино-бота.
 
-Все команды и callback-ы защищены проверкой ADMIN_ID. Команды ``/rig``
-и ``/podk`` оставлены только как заглушка, т.к. подкрутка полностью отключена.
+Все команды и callback-ы защищены проверкой ADMIN_ID.
 """
 import asyncio
 import os
@@ -15,6 +14,7 @@ from database import (
     cursor,
     db_get_global_stats,
     db_get_user,
+    db_set_rig,
     get_maintenance_mode,
     get_real_id,
     set_maintenance_mode,
@@ -60,16 +60,20 @@ def build_admin_panel():
     builder.button(text="⭐ Предметы", callback_data="admin:items")
     builder.button(text="⛏️ Майнинг", callback_data="admin:mining")
     builder.button(text="🎮 Игроки", callback_data="admin:players")
+    builder.button(text="🎚 Подкрут", callback_data="admin:rig")
+    builder.button(text="👑 Привилегии", callback_data="admin:privileges")
+    builder.button(text="⏱ Сброс КД", callback_data="admin:cd")
+    builder.button(text="📊 Экономика", callback_data="admin:econ")
     builder.button(text="📢 Рассылка", callback_data="admin:broadcast")
     builder.button(text="🏆 Топ", callback_data="admin:top")
-    builder.button(text="📊 Статистика", callback_data="admin:stats")
+    builder.button(text="📈 Статистика", callback_data="admin:stats")
     builder.button(text="🎁 Раздача всем", callback_data="admin:giveall")
 
     is_maint = get_maintenance_mode()
     maint_text = "🔴 Тех. работы: ВКЛ" if is_maint else "🟢 Тех. работы: ВЫКЛ"
     builder.button(text=maint_text, callback_data="admin:toggle_maintenance")
 
-    builder.adjust(2, 2, 2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 2, 2, 2, 2, 1)
 
     text = (
         "👑 <b>АДМИН-ПАНЕЛЬ</b>\n"
@@ -367,13 +371,211 @@ async def admin_reset_money(message: types.Message):
 
 
 @router.message(Command("rig", "podk"))
-async def admin_rig_disabled(message: types.Message):
+async def admin_rig(message: types.Message):
+    """/rig <id> true|false|off — выставляет глобальную подкрутку для игрока."""
     if not is_admin(message.from_user.id):
         return
+    parts = message.text.split()
+    if len(parts) < 3:
+        return await message.answer(
+            "Формат: <code>/rig [ID|ник] [true|false|off]</code>\n"
+            "• <code>true</code> — всегда победа\n"
+            "• <code>false</code> — всегда поражение\n"
+            "• <code>off</code> — честный режим",
+            parse_mode="HTML",
+        )
+    target, mode = parts[1], parts[2].lower()
+    mode_map = {"true": "win", "false": "lose", "off": "off", "win": "win", "lose": "lose"}
+    if mode not in mode_map:
+        return await message.answer("❌ Значение: true / false / off")
+
+    real_id = get_real_id(target)
+    if not real_id:
+        return await message.answer("❌ Игрок не найден.")
+
+    if not db_set_rig(real_id, mode_map[mode]):
+        return await message.answer("❌ Не удалось применить подкрут.")
+
+    label = {"win": "🟢 всегда победа", "lose": "🔴 всегда поражение", "off": "⚪ отключена"}
     await message.answer(
-        "ℹ️ Подкрутка полностью отключена. Игра работает в честном режиме.",
+        f"✅ Подкрут для <code>{real_id}</code>: {label[mode_map[mode]]}",
         parse_mode="HTML",
     )
+
+
+@router.message(Command("rigs"))
+async def admin_rig_list(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    cursor.execute("SELECT id, custom_id, rig_force FROM users WHERE rig_force IN ('win','lose')")
+    rows = cursor.fetchall()
+    if not rows:
+        return await message.answer("ℹ️ Подкруток сейчас нет.")
+    lines = [
+        f"• <code>{rid}</code> ({cid}): <b>{rig}</b>"
+        for rid, cid, rig in rows
+    ]
+    await message.answer("🎚 <b>Активные подкруты:</b>\n" + "\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("setvip"))
+async def admin_set_vip(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 3:
+        return await message.answer(
+            "Формат: <code>/setvip [ID|ник] [bronze|silver|gold|none]</code>",
+            parse_mode="HTML",
+        )
+    target, tier = parts[1], parts[2].lower()
+    if tier not in ("bronze", "silver", "gold", "none"):
+        return await message.answer("❌ Тиры: bronze / silver / gold / none")
+    real_id = get_real_id(target)
+    if not real_id:
+        return await message.answer("❌ Игрок не найден.")
+    cursor.execute("UPDATE users SET privilege = ? WHERE id = ?", (tier, real_id))
+    conn.commit()
+    await message.answer(
+        f"👑 Привилегия <code>{real_id}</code> установлена: <b>{tier}</b>",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("resetcd"))
+async def admin_reset_cd(message: types.Message):
+    """Сбрасывает КД на /bonus и /wheel."""
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.answer(
+            "Формат: <code>/resetcd [ID|ник]</code>", parse_mode="HTML"
+        )
+    real_id = get_real_id(parts[1])
+    if not real_id:
+        return await message.answer("❌ Игрок не найден.")
+    cursor.execute(
+        "UPDATE users SET last_bonus = 0, last_wheel = 0 WHERE id = ?",
+        (real_id,),
+    )
+    conn.commit()
+    await message.answer(f"⏱ КД сброшено для <code>{real_id}</code>.", parse_mode="HTML")
+
+
+@router.message(Command("econ"))
+async def admin_econ(message: types.Message):
+    """Сводка по экономике бота."""
+    if not is_admin(message.from_user.id):
+        return
+    cursor.execute("SELECT COUNT(*), COALESCE(SUM(balance), 0) FROM users")
+    total_users, total_bal = cursor.fetchone()
+    cursor.execute("SELECT AVG(balance) FROM users")
+    avg_bal = cursor.fetchone()[0] or 0
+    cursor.execute(
+        "SELECT privilege, COUNT(*) FROM users GROUP BY privilege"
+    )
+    priv_rows = cursor.fetchall()
+    cursor.execute("SELECT COALESCE(SUM(profit), 0) FROM daily_stats")
+    daily_profit = cursor.fetchone()[0] or 0
+    cursor.execute(
+        "SELECT COUNT(*) FROM lottery_tickets WHERE status = 'active'"
+    )
+    active_tickets = cursor.fetchone()[0] or 0
+
+    priv_txt = ", ".join(f"{p or 'none'}: {c}" for p, c in priv_rows) or "—"
+    text = (
+        "📊 <b>ЭКОНОМИКА БОТА</b>\n"
+        "━━━━━━━━━━━━━\n"
+        f"👥 Игроков: {total_users}\n"
+        f"💰 Общий банк: {total_bal:,} 💎\n"
+        f"📈 Средний баланс: {int(avg_bal):,} 💎\n"
+        f"🎟 Активных билетов: {active_tickets}\n"
+        f"📅 Прибыль за сегодня (net): {daily_profit:,} 💎\n"
+        f"👑 По привилегиям: {priv_txt}\n"
+    )
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:rig")
+async def admin_rig_menu(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer()
+    cursor.execute("SELECT id, custom_id, rig_force FROM users WHERE rig_force IN ('win','lose')")
+    rows = cursor.fetchall()
+    rig_list = (
+        "\n".join(f"• <code>{rid}</code> ({cid}): <b>{rig}</b>" for rid, cid, rig in rows)
+        if rows else "—"
+    )
+    text = (
+        "<b>🎚 ПОДКРУТ</b>\n\n"
+        "<code>/rig [ID|ник] true|false|off</code>\n"
+        "• <code>true</code> — всегда победа в играх без telegram-дайса\n"
+        "• <code>false</code> — всегда поражение\n"
+        "• <code>off</code> — честно\n\n"
+        "Подкрут работает в: 💣 mines, 🎡 roulette, 📦 chests, 🪙 flip, 🚀 crash.\n"
+        "Игры через telegram-дайс (slots / dice / darts / football / basket) управляются Telegram и не подкручиваются.\n\n"
+        f"<b>Сейчас активно:</b>\n{rig_list}"
+    )
+    await call.message.edit_text(text, reply_markup=back_to_panel_kb(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:privileges")
+async def admin_privileges_menu(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer()
+    cursor.execute(
+        "SELECT privilege, COUNT(*) FROM users WHERE privilege != 'none' GROUP BY privilege"
+    )
+    rows = cursor.fetchall()
+    priv_list = "\n".join(f"• {p}: <b>{c}</b>" for p, c in rows) or "—"
+    text = (
+        "<b>👑 ПРИВИЛЕГИИ</b>\n\n"
+        "<code>/setvip [ID|ник] bronze|silver|gold|none</code>\n\n"
+        "Тиры:\n"
+        "• 🥉 Bronze — +2% кэшбэк\n"
+        "• 🥈 Silver — +5% кэшбэк\n"
+        "• 🥇 Gold — +10% кэшбэк, двойной ежедневный бонус\n\n"
+        f"<b>Выдано сейчас:</b>\n{priv_list}"
+    )
+    await call.message.edit_text(text, reply_markup=back_to_panel_kb(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:cd")
+async def admin_cd_menu(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer()
+    text = (
+        "<b>⏱ СБРОС КД</b>\n\n"
+        "<code>/resetcd [ID|ник]</code> — сбрасывает КД на /bonus и /wheel\n"
+    )
+    await call.message.edit_text(text, reply_markup=back_to_panel_kb(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:econ")
+async def admin_econ_menu(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer()
+    cursor.execute("SELECT COUNT(*), COALESCE(SUM(balance), 0) FROM users")
+    total_users, total_bal = cursor.fetchone()
+    cursor.execute("SELECT AVG(balance) FROM users")
+    avg_bal = cursor.fetchone()[0] or 0
+    cursor.execute("SELECT COALESCE(SUM(profit), 0) FROM daily_stats")
+    daily_profit = cursor.fetchone()[0] or 0
+    cursor.execute(
+        "SELECT COUNT(*) FROM lottery_tickets WHERE status = 'active'"
+    )
+    active_tickets = cursor.fetchone()[0] or 0
+    text = (
+        "<b>📊 ЭКОНОМИКА</b>\n\n"
+        f"👥 Игроков: {total_users}\n"
+        f"💰 Общий банк: {total_bal:,} 💎\n"
+        f"📈 Средний баланс: {int(avg_bal):,} 💎\n"
+        f"🎟 Активных билетов: {active_tickets}\n"
+        f"📅 Прибыль за сегодня (net): {daily_profit:,} 💎\n\n"
+        "Подробнее: <code>/econ</code>"
+    )
+    await call.message.edit_text(text, reply_markup=back_to_panel_kb(), parse_mode="HTML")
 
 
 

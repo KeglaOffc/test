@@ -58,21 +58,7 @@ async def cmd_help(message: types.Message):
     )
     await message.answer(help_text, parse_mode="Markdown")
 
-@router.message(Command("start"))
-async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
-
-    db_get_user(user_id)
-
-    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-    row = cursor.fetchone()
-    if not row:
-        return await message.answer(
-            "❌ Не удалось создать профиль. Попробуй ещё раз через минуту."
-        )
-
-    columns = [description[0] for description in cursor.description]
-    u = dict(zip(columns, row))
+def _render_profile(u: dict, user_id: int) -> str:
 
     profit = u['total_wins'] - u['total_bets']
     now = int(time.time())
@@ -111,7 +97,7 @@ async def cmd_start(message: types.Message):
     free_games_status = "🏆" if u.get('free_games_unlocked', 0) == 1 else "📊"
     pvp_status = f"{free_games_status} {pvp_wins}/50 побед" if pvp_wins < 50 else f"🏆 {pvp_wins} побед - ВИП!"
 
-    text = (
+    return (
         f"{aura} **ЛИЧНЫЙ КАБИНЕТ** {vip}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"👤 **Игрок:** `{u['custom_id'] or u['id']}`\n"
@@ -119,7 +105,6 @@ async def cmd_start(message: types.Message):
         f"💳 **Баланс:** `{u['balance']:,}` 💎\n"
         f"🏆 **Уровень {lvl}:**\n"
         f"`[{bar}]` ({u['games_played']} игр)\n\n"
-        
         f"📊 **СТАТИСТИКА:**\n"
         f"• Выигрыши: `{u['total_wins']:,}`\n"
         f"• Ставки: `{u['total_bets']:,}`\n"
@@ -129,14 +114,41 @@ async def cmd_start(message: types.Message):
         f"• Статус: `{incognito_status}`\n"
         f"• Сейф: `{safe_info}`\n"
         f"• Онлайн: `{pvp_status}`\n\n"
-        
         f"🎒 **ИНВЕНТАРЬ:**\n"
         f"{inv_str}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🎮 **Меню:** /games  |  🛒 **Магазин:** /shop"
     )
-    
+
+
+def _profile_text(user_id: int) -> str:
+    db_get_user(user_id)
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        return "❌ Не удалось создать профиль. Попробуй ещё раз через минуту."
+    columns = [description[0] for description in cursor.description]
+    u = dict(zip(columns, row))
+    return _render_profile(u, user_id)
+
+
+@router.message(Command("start"))
+async def cmd_start(message: types.Message):
+    if not await check_user(message):
+        return
+    text = _profile_text(message.from_user.id)
     await safe_reply_message(message, text, parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "go:start")
+async def cb_go_start(call: types.CallbackQuery):
+    """Единая кнопка «🏠 В меню» из любых внутренних меню."""
+    await call.answer()
+    text = _profile_text(call.from_user.id)
+    try:
+        await call.message.edit_text(text, parse_mode="Markdown")
+    except Exception:
+        await call.message.answer(text, parse_mode="Markdown")
 
 SHOP_CATALOG = {
     # Бусты и удача

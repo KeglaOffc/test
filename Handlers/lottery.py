@@ -42,10 +42,10 @@ HOURLY = {
     "price": 1_000,
     "limit_per_period": 10,
     "pool_share": 0.95,
-    "numbers_count": 3,
-    "numbers_pool": 30,
+    "numbers_count": 4,
+    "numbers_pool": 40,
     "period_seconds": 3600,
-    "prizes": {3: "jackpot", 2: 5, 1: 1},
+    "prizes": {4: "jackpot", 3: 20, 2: 5, 1: 1},
 }
 WEEKLY = {
     "key": "weekly",
@@ -55,7 +55,7 @@ WEEKLY = {
     "limit_per_period": 20,
     "pool_share": 0.80,
     "numbers_count": 5,
-    "numbers_pool": 49,
+    "numbers_pool": 45,
     "period_seconds": 7 * 24 * 3600,
     "prizes": {5: "jackpot", 4: 50, 3: 10, 2: 2},
 }
@@ -67,7 +67,7 @@ MEGA = {
     "limit_per_period": 5,
     "pool_share": 1.0,
     "numbers_count": 6,
-    "numbers_pool": 60,
+    "numbers_pool": 50,
     "period_seconds": 7 * 24 * 3600,
     "prizes": {6: "jackpot", 5: 100, 4: 20, 3: 3},
 }
@@ -188,8 +188,8 @@ def main_menu_kb() -> types.InlineKeyboardMarkup:
     kb.button(text="🐳 Мега",        callback_data="lot:menu:mega")
     kb.button(text="🎟 Мгновенная", callback_data="lot:scratch")
     kb.button(text="🎪 Пользовательские", callback_data="lot:user")
-    kb.button(text="🗑 Мои использованные билеты", callback_data="lot:archive")
-    kb.button(text="🏠 В профиль", callback_data="lot:close")
+    kb.button(text="🎒 Инвентарь",        callback_data="lot:inv")
+    kb.button(text="🏠 В меню", callback_data="go:start")
     kb.adjust(3, 1, 1, 1, 1)
     return kb.as_markup()
 
@@ -197,9 +197,9 @@ def main_menu_kb() -> types.InlineKeyboardMarkup:
 def main_menu_text() -> str:
     return (
         "🎰 <b>Лотерейный центр</b>\n\n"
-        "• <b>Часовая</b> — 3 номера из 30, розыгрыш каждый час.\n"
-        "• <b>Недельная</b> — 5 из 49, розыгрыш в воскресенье 23:59.\n"
-        "• <b>Мега</b> — 6 из 60, раз в неделю, весь банк одному.\n"
+        "• <b>Часовая</b> — 4 номера из 40, розыгрыш каждый час.\n"
+        "• <b>Недельная</b> — 5 из 45, розыгрыш в воскресенье 23:59.\n"
+        "• <b>Мега</b> — 6 из 50, раз в неделю, весь банк одному.\n"
         "• <b>Мгновенная</b> — моментальный скретч.\n"
         "• <b>Пользовательские</b> — розыгрыши от игроков.\n\n"
         "Купленные билеты лежат в инвентаре каждой лотереи, "
@@ -402,13 +402,68 @@ async def lot_tickets(call: types.CallbackQuery):
 
 # ─────────────── архив / корзина использованных билетов ───────────────
 
+@router.callback_query(F.data == "lot:inv")
+async def lot_inventory_menu(call: types.CallbackQuery):
+    """Инвентарь билетов: активные + использованные."""
+    await call.answer()
+    active_total = 0
+    for cfg in (HOURLY, WEEKLY, MEGA):
+        draw_id, _ = current_draw(cfg)
+        active_total += len(user_active_tickets(call.from_user.id, cfg, draw_id))
+    cursor.execute(
+        "SELECT COUNT(*) FROM lottery_tickets WHERE user_id = ? AND status = 'archived'",
+        (call.from_user.id,),
+    )
+    archived_total = cursor.fetchone()[0] or 0
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"✅ Активные ({active_total})", callback_data="lot:inv:active")
+    kb.button(text=f"🗑 Использованные ({archived_total})", callback_data="lot:archive")
+    kb.button(text="⬅️ Назад", callback_data="lot:main")
+    kb.adjust(1)
+    text = (
+        "🎒 <b>Инвентарь лотерей</b>\n\n"
+        f"✅ Активных билетов: <b>{active_total}</b>\n"
+        f"🗑 В корзине: <b>{archived_total}</b>\n\n"
+        "Активные — билеты текущих тиражей. Использованные — уже разыгранные."
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "lot:inv:active")
+async def lot_inventory_active(call: types.CallbackQuery):
+    """Показывает активные билеты по всем системным лотереям."""
+    await call.answer()
+    lines = []
+    for cfg in (HOURLY, WEEKLY, MEGA):
+        draw_id, _ = current_draw(cfg)
+        tickets = user_active_tickets(call.from_user.id, cfg, draw_id)
+        if not tickets:
+            continue
+        lines.append(f"\n{cfg['title']} — тираж #{draw_id}")
+        for i, (tid, nums_str) in enumerate(tickets, 1):
+            nums = [int(x) for x in nums_str.split(",")]
+            lines.append(f"  🎫 №{i} (id {tid}): {format_numbers(nums)}")
+    text = "\n".join(lines).strip() if lines else "✅ У тебя нет активных билетов."
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="lot:inv")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(text or "✅ Активных билетов нет.", reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
 @router.callback_query(F.data == "lot:archive")
 async def lot_archive_menu(call: types.CallbackQuery):
     await call.answer()
     kb = InlineKeyboardBuilder()
     for cfg in (HOURLY, WEEKLY, MEGA, {"key": "scratch", "title": "🎟 Мгновенная"}):
         kb.button(text=cfg["title"], callback_data=f"lot:arch:{cfg['key']}")
-    kb.button(text="⬅️ Назад", callback_data="lot:main")
+    kb.button(text="⬅️ Назад", callback_data="lot:inv")
     kb.adjust(2, 2, 1)
     try:
         await call.message.edit_text(
