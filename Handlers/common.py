@@ -60,9 +60,9 @@ async def cmd_help(message: types.Message):
         "• `/football [сумма]` — Серия пенальти\n"
         "• `/basket [сумма]` — Броски в кольцо\n\n"
 
-        "🧭 **СОЦИАЛЬНОЕ И СЕЗОН:**\n"
-        "• `/clan` — Кланы, общий банк, клан-чат, топ кланов\n"
-        "• `/bp` — Боевой пропуск (30 уровней, free + premium)\n\n"
+        "🧭 **СОЦИАЛЬНОЕ:**\n"
+        "• `/clan` — Кланы, роли, общий банк, чат, теги, топ\n"
+        "• `/ref` — Рефералка: личная ссылка и бонусы\n\n"
 
         "💡 *Пример: /mines 1000 (ставка 1000, размер и бомбы — в меню)*"
     )
@@ -76,6 +76,13 @@ def _render_profile(u: dict, user_id: int) -> str:
     aura = "✨" if u.get('aura_active') == 1 else ""
     vip = "👑" if u['rigged_mode'] == 'vip' else ""
     tag = u.get('cosmetic_tag') or ""
+    try:
+        from Handlers.clans import clan_tag_for
+        clan_tag = clan_tag_for(user_id)
+        if clan_tag:
+            tag = clan_tag
+    except Exception:
+        pass
     role_label = ROLE_LABELS.get(db_get_role(user_id), "")
     priv = (u.get('privilege') or 'none')
     priv_badge = {"bronze": "🥉 VIP-Bronze", "silver": "🥈 VIP-Silver", "gold": "🥇 VIP-Gold"}.get(priv, "")
@@ -153,6 +160,14 @@ def _profile_text(user_id: int) -> str:
 async def cmd_start(message: types.Message):
     if not await check_user(message):
         return
+
+    # Если это переход по реферальной ссылке — связываем и выдаём бонусы.
+    try:
+        from Handlers.referrals import handle_start_referral
+        await handle_start_referral(message)
+    except Exception:
+        pass
+
     text = _profile_text(message.from_user.id)
     await safe_reply_message(message, text, parse_mode="Markdown")
 
