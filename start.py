@@ -69,6 +69,11 @@ from Handlers import (  # noqa: E402
 )
 from Handlers.logging_middleware import LoggingMiddleware  # noqa: E402
 from Handlers.maintenance import MaintenanceMiddleware  # noqa: E402
+from Handlers.ownership import (  # noqa: E402
+    OwnershipMiddleware,
+    UserContextMiddleware,
+    install_patches as install_ownership_patches,
+)
 from Handlers.throttling import flood_middleware  # noqa: E402
 
 try:
@@ -127,6 +132,10 @@ async def main() -> None:
     dp.callback_query.outer_middleware(MaintenanceMiddleware())
     dp.message.outer_middleware(flood_middleware())
     dp.callback_query.outer_middleware(flood_middleware())
+    dp.message.outer_middleware(UserContextMiddleware())
+    dp.callback_query.outer_middleware(UserContextMiddleware())
+    dp.callback_query.outer_middleware(OwnershipMiddleware())
+    install_ownership_patches()
 
     for router in ROUTERS:
         dp.include_router(router)
