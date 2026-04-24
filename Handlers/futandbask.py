@@ -395,10 +395,10 @@ SLOT_SYMBOLS = {
 }
 
 SLOT_TRIPLES = {
-    1:  {"reels": "🍫🍫🍫", "name": "Три шоколадки",   "coeff": 6},
-    22: {"reels": "🍒🍒🍒", "name": "Три вишни",       "coeff": 10},
-    43: {"reels": "🍋🍋🍋", "name": "Три лимона",      "coeff": 15},
-    64: {"reels": "7️⃣7️⃣7️⃣", "name": "Джекпот 777",  "coeff": 30},
+    1:  {"reels": "🍫🍫🍫", "name": "Три шоколадки",   "coeff": 10},
+    22: {"reels": "🍒🍒🍒", "name": "Три вишни",       "coeff": 20},
+    43: {"reels": "🍋🍋🍋", "name": "Три лимона",      "coeff": 30},
+    64: {"reels": "7️⃣7️⃣7️⃣", "name": "Джекпот 777",  "coeff": 77},
 }
 
 
@@ -414,8 +414,12 @@ def slot_result(value: int) -> dict:
              SLOT_SYMBOLS[((v // 16) % 4) + 1]]
     counts = {s: reels.count(s) for s in reels}
 
+    if counts.get("7️⃣", 0) == 2:
+        return {"reels": "".join(reels), "name": "Два семёрки", "coeff": 5}
     if counts.get("🍒", 0) == 2:
-        return {"reels": "".join(reels), "name": "Две вишни", "coeff": 2}
+        return {"reels": "".join(reels), "name": "Две вишни", "coeff": 3}
+    if counts.get("🍋", 0) == 2:
+        return {"reels": "".join(reels), "name": "Два лимона", "coeff": 2}
     if counts.get("🍫", 0) == 2:
         return {"reels": "".join(reels), "name": "Две шоколадки", "coeff": 1}
     return {"reels": "".join(reels), "name": "Мимо", "coeff": 0}
@@ -433,11 +437,13 @@ async def play_slots(message: types.Message):
             "🎰 <b>Слоты</b>\n"
             "Формат: <code>/slot [ставка]</code>\n\n"
             "Выплаты за комбинации:\n"
-            "• 🍫🍫🍫 — x6\n"
-            "• 🍒🍒🍒 — x10\n"
-            "• 🍋🍋🍋 — x15\n"
-            "• 7️⃣7️⃣7️⃣ — x30 (джекпот)\n"
-            "• Две вишни — x2\n"
+            "• 🍫🍫🍫 — x10\n"
+            "• 🍒🍒🍒 — x20\n"
+            "• 🍋🍋🍋 — x30\n"
+            "• 7️⃣7️⃣7️⃣ — x77 (джекпот)\n"
+            "• Две семёрки — x5\n"
+            "• Две вишни — x3\n"
+            "• Два лимона — x2\n"
             "• Две шоколадки — x1 (возврат ставки)",
             parse_mode="HTML",
         )

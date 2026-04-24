@@ -19,7 +19,7 @@ from database import (
     get_real_id,
     set_maintenance_mode,
 )
-from Handlers.mining import SHOP_ITEMS
+from Handlers.mining import CATALOG as MINING_CATALOG
 
 router = Router()
 
@@ -611,10 +611,10 @@ async def admin_mine_add(message: types.Message):
             parse_mode="HTML",
         )
 
-    if item_name not in SHOP_ITEMS:
+    if item_name not in MINING_CATALOG:
         return await message.answer(f"❌ Предмет '{item_name}' не найден.")
 
-    item = SHOP_ITEMS[item_name]
+    item = MINING_CATALOG[item_name]
 
     cursor.execute("SELECT 1 FROM mining_farms WHERE user_id = ?", (user_id,))
     if not cursor.fetchone():

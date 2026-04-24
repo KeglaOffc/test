@@ -209,6 +209,19 @@ def apply_migrations() -> None:
         ("pvp_games", "game_mode", "TEXT DEFAULT 'dice'"),
         ("users", "pvp_wins", "INTEGER DEFAULT 0"),
         ("users", "free_games_unlocked", "INTEGER DEFAULT 0"),
+        ("lottery_tickets", "numbers", "TEXT DEFAULT ''"),
+        ("lottery_tickets", "draw_id", "INTEGER DEFAULT 0"),
+        ("lottery_tickets", "status", "TEXT DEFAULT 'active'"),
+        ("lottery_tickets", "win", "INTEGER DEFAULT 0"),
+        ("hourly_state", "winning_numbers", "TEXT DEFAULT ''"),
+        ("hourly_state", "drawn_at", "INTEGER DEFAULT 0"),
+        ("weekly_state", "winning_numbers", "TEXT DEFAULT ''"),
+        ("weekly_state", "drawn_at", "INTEGER DEFAULT 0"),
+        ("mega_state", "winning_numbers", "TEXT DEFAULT ''"),
+        ("mega_state", "drawn_at", "INTEGER DEFAULT 0"),
+        ("users", "privilege", "TEXT DEFAULT 'none'"),
+        ("users", "last_wheel", "INTEGER DEFAULT 0"),
+        ("users", "scratch_pack", "INTEGER DEFAULT 0"),
     ]
 
     for table, column, definition in migrations:
