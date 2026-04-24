@@ -182,7 +182,7 @@ async def football_penalty_series(event: types.Message | types.CallbackQuery, st
     # Кнопка переиграть
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Переиграть", callback_data=f"replay_football:{bet}")
-    builder.button(text="🏠 В меню", callback_data="back_to_profile")
+    builder.button(text="🏠 В меню", callback_data="go:start")
     
     try:
         await message.answer(results_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
@@ -331,7 +331,7 @@ async def basket_penalty_series(event: types.Message | types.CallbackQuery, stat
     
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Переиграть", callback_data=f"replay_basket:{bet}")
-    builder.button(text="🏠 В меню", callback_data="back_to_profile")
+    builder.button(text="🏠 В меню", callback_data="go:start")
     
     try:
         await message.answer(results_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
@@ -503,7 +503,7 @@ async def play_single_slot(message: types.Message, bet: int):
     kb = InlineKeyboardBuilder()
     kb.button(text=f"🔄 Ещё за {bet:,}", callback_data=f"replay_slot:{bet}")
     kb.button(text="✖️ x2 ставку", callback_data=f"replay_slot:{bet * 2}")
-    kb.button(text="🏠 В меню", callback_data="back_to_profile")
+    kb.button(text="🏠 В меню", callback_data="go:start")
     kb.adjust(1, 1, 1)
 
     try:
@@ -530,48 +530,9 @@ async def go_back_to_profile(call: types.CallbackQuery, state: FSMContext):
     
     try:
         await call.message.delete()
-    except:
+    except Exception:
         pass
-    
-    # Отправляем новое сообщение вместо reply на удалённое
-    from Handlers.common import cmd_start
-    
-    # Создаём новое сообщение вместо reply
-    user_id = call.from_user.id
-    user_data = db_get_user(user_id)
-    
-    if not user_data:
-        return await call.message.answer("❌ Ошибка данных пользователя")
-    
-    u = user_data
-    
-    boost_text = "✅ Активен" if u[6] > 0 else "❌ Нет"
-    
-    text = (
-        f"👤 **ПРОФИЛЬ** {call.from_user.first_name}\n"
-        f"ID: `{user_id}`\n\n"
-        f"💰 Баланс: `{u[0]:,}` 💎\n\n"
-        f"📊 **СТАТИСТИКА:**\n"
-        f"┃ 🎮 Игр сыграно: `{u[5]}`\n"
-        f"┃ 🏆 Всего выиграно: `{u[4]:,}` 💎\n"
-        f"┃ 📈 Всего ставлено: `{u[3]:,}` 💎\n"
-        f"┃ ⚡️ X2 Буст: `{boost_text}`\n"
-        f"┃\n"
-        f"┃ 🎒 **ИНВЕНТАРЬ:**\n"
-        f"┃ 🛡 Щиты: `{u[7] if len(u) > 7 else 0}` | 🔍 Сканеры: `{u[8] if len(u) > 8 else 0}`\n"
-        f"┃ 🔄 Рэроллы: `{u[9] if len(u) > 9 else 0}` | ⚡️ Энергетики: `{u[10] if len(u) > 10 else 0}`\n"
-        f"┃ 🎟 Золотой билет: `{'✅ Есть' if u[11] and u[11] > 0 else '❌ Нет'}`\n"
-        f"———————————————————\n"
-        f"🆘 *Помощь по командам:* `/help`"
-    )
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🎮 Игры", callback_data="games_menu")
-    builder.button(text="🏪 Магазин", callback_data="shop:back")
-    builder.button(text="🏆 Лидеры", callback_data="qtop")
-    builder.adjust(2, 1)
-    
-    try:
-        await call.message.answer(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-    except Exception as e:
-        await call.message.answer(f"✅ Добро пожаловать в профиль!\n\n/help для справки", parse_mode="Markdown")
+
+    from Handlers.common import _profile_text
+    text = _profile_text(call.from_user.id)
+    await call.message.answer(text, parse_mode="Markdown")

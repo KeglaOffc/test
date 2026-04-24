@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from database import conn, cursor, db_get_user, db_update_stats
+from database import conn, cursor, db_get_user, db_update_stats, db_get_rig
 from Handlers.common import check_user
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,22 @@ def bet_label(bet_type: str, bet_value: str) -> str:
     if bet_type == "num":
         return f"🎯 Число {bet_value}"
     return "?"
+
+
+def _rigged_spin(bets: List[Dict[str, Any]], rig: str) -> int:
+    """Подбирает номер барабана под подкрут: 'win' → есть выплата, 'lose' → все мимо."""
+    if not bets:
+        return random.randint(0, 36)
+    wanted = rig == "win"
+    candidates = []
+    for n in range(37):
+        total = sum(bet_multiplier(b["type"], b["value"], n) for b in bets)
+        hit = total > 0
+        if hit == wanted:
+            candidates.append(n)
+    if not candidates:
+        return random.randint(0, 36)
+    return random.choice(candidates)
 
 
 def bet_multiplier(bet_type: str, bet_value: str, n: int) -> int:
@@ -281,7 +297,8 @@ async def rl_spin(call: types.CallbackQuery, state: FSMContext):
 
     balance_after_stake = db_get_user(user_id)[0]
 
-    n = random.randint(0, 36)
+    rig = db_get_rig(user_id)
+    n = _rigged_spin(bets, rig) if rig != "off" else random.randint(0, 36)
     total_win = 0
     report_lines = []
     for b in bets:

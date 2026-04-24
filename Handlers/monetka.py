@@ -5,7 +5,7 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from database import db_get_user, db_update_stats, cursor, conn
+from database import db_get_user, db_update_stats, cursor, conn, db_get_rig
 from Handlers.common import check_user
 
 logger = logging.getLogger(__name__)
@@ -99,8 +99,8 @@ async def flip_result(call: types.CallbackQuery):
             # Списываем ставку АТОМАРНО
             cursor.execute("UPDATE users SET balance = balance - ? WHERE id = ?", (bet, user_id))
             
-            status_db = u_d[6]
-            
+            status_db = db_get_rig(user_id)
+
             if status_db == "win":
                 res = choice
             elif status_db == "lose":

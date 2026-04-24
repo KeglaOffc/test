@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # Импортируем функции БД и общую проверку
-from database import db_get_user, db_update_stats, cursor, conn
+from database import db_get_user, db_update_stats, cursor, conn, db_get_rig
 from Handlers.common import check_user
 
 logger = logging.getLogger(__name__)
@@ -125,9 +125,8 @@ async def chest_open(call: types.CallbackQuery):
             else:
                 base_pool = [2.0, 0.0, 0.5]
             
-            u_d = db_get_user(user_id)
-            status = u_d[6]
-            
+            status = db_get_rig(user_id)
+
             if status == 'win':
                 # Гарантируем выигрыш
                 outcomes = [max(base_pool) * 1.5] * num_chests
