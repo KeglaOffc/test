@@ -50,9 +50,12 @@ from database import (  # noqa: E402
 )
 from Handlers import (  # noqa: E402
     admin,
+    battlepass,
+    clans,
     common,
     crash,
     dicedarts,
+    events,
     futandbask,
     lottery,
     mines,
@@ -98,6 +101,9 @@ ROUTERS = [
     crash.router,
     roulette.router,
     wheel.router,
+    events.router,
+    clans.router,
+    battlepass.router,
 ]
 
 
